@@ -19,7 +19,6 @@ import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
@@ -159,7 +158,10 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @NotNull
     @PluginProperty(group = "main")
     @ToString.Exclude
-    private Property<@NotEmpty List<@Valid Action>> actions;
+    // PropertyValueExtractor cascades into action values, but collection constraints on this
+    // wrapped list are incorrectly evaluated as empty during flow validation. Keep the
+    // non-empty check in run() so populated YAML action lists can be saved successfully.
+    private Property<List<@Valid Action>> actions;
 
     @Schema(
         title = "Base URL",
@@ -234,8 +236,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             } catch (RuntimeException e) {
                 throw new IllegalStateException(
                     "Could not connect to the Playwright " + rBrowser + " server. Confirm it is reachable and runs Playwright "
-                        + PLAYWRIGHT_VERSION + ": " + shortMessage(e).replace(rServerUrl, "<serverUrl>"),
-                    e
+                        + PLAYWRIGHT_VERSION + ": " + shortMessage(e).replace(rServerUrl, "<serverUrl>")
                 );
             }
             checkKilled();
@@ -467,7 +468,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         return URI.create(rBaseUrl).resolve(target).toString();
     }
 
-    private com.microsoft.playwright.BrowserType browserType(Playwright playwright, Browser rBrowser) {
+    private BrowserType browserType(Playwright playwright, Browser rBrowser) {
         return switch (rBrowser) {
             case CHROMIUM -> playwright.chromium();
             case FIREFOX -> playwright.firefox();
@@ -579,7 +580,15 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @NoArgsConstructor
     @AllArgsConstructor
     public static class Action {
-        @Schema(title = "Action", description = "Browser interaction or assertion to execute.")
+        @Schema(
+            title = "Action",
+            description = """
+                Action to execute: `NAVIGATE` (`url`), `CLICK` (`selector`), `FILL` (`selector`, `value`),
+                `PRESS` (`selector`, `key`), `WAIT_FOR` (`selector`), `SCREENSHOT` (`name`, optional `fullPage`),
+                `ASSERT_VISIBLE` (`selector`), `ASSERT_TEXT` (`selector`, `text`, optional `regex`),
+                `ASSERT_URL` (`url`, optional `regex`), or `ASSERT_TITLE` (`title`).
+                """
+        )
         @NotNull
         @PluginProperty(group = "main")
         private ActionType action;
