@@ -2,7 +2,7 @@
 
 Use the Playwright plugin for browser checks that should fail a Kestra task when a page, element, text value, URL, or title does not meet an expectation. Common uses include post-deploy smoke checks and scheduled synthetic checks of login or checkout paths.
 
-## Connect to a Playwright server
+## Authentication
 
 The plugin connects to a remote Playwright server over WebSocket. It does not launch browsers on the Kestra worker.
 
@@ -17,7 +17,7 @@ Set `serverUrl` to the resulting endpoint, such as `ws://playwright:3000/`. Stor
 
 When upgrading Playwright, update the Java dependency, Docker image tag, `npx` package version, examples, and documentation together.
 
-## Actions
+## Tasks
 
 `Check` runs every item in `actions` sequentially in one browser context:
 
