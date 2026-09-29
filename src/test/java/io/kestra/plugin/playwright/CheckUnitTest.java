@@ -42,4 +42,12 @@ class CheckUnitTest {
         assertThat(action.toString(), not(containsString("highly-sensitive-value")));
         assertThat(task.toString(), not(containsString("highly-sensitive-value")));
     }
+
+    @Test
+    void shouldRejectUnsafeScreenshotNames() {
+        for (var name : List.of("../capture.png", "folder/capture.png", "folder\\capture.png")) {
+            assertThrows(IllegalArgumentException.class, () -> Check.screenshotName(name));
+        }
+        assertThat(Check.screenshotName("capture.png"), is("capture.png"));
+    }
 }

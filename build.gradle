@@ -179,7 +179,7 @@ shadowJar {
     archiveClassifier.set(null)
     mergeServiceFiles()
 
-    // Kestra workers run this plugin on Linux; removing other Node runtimes keeps the plugin artifact deployable.
+    // Ship only the Linux Node drivers used by Kestra workers.
     exclude "driver/mac/**"
     exclude "driver/mac-arm64/**"
     exclude "driver/win32_x64/**"

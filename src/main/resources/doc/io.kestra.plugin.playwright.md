@@ -4,7 +4,7 @@ Use the Playwright plugin for browser checks that should fail a Kestra task when
 
 ## Authentication
 
-The plugin connects to a remote Playwright server over WebSocket. It does not launch browsers on the Kestra worker.
+The plugin connects to a remote Playwright server over WebSocket. It starts a local Playwright Node driver for each run, but does not launch or download browsers on the Kestra worker. The shaded JAR includes Linux x64 and ARM64 drivers only, so this build requires a Linux worker.
 
 Playwright requires the server and Java client versions to match exactly. This plugin uses Playwright `1.63.0`. Start the matching server with:
 
@@ -13,7 +13,7 @@ docker run --rm -p 3000:3000 mcr.microsoft.com/playwright:v1.63.0-noble \
   npx -y playwright@1.63.0 run-server --port 3000 --host 0.0.0.0
 ```
 
-Set `serverUrl` to the resulting endpoint, such as `ws://playwright:3000/`. Store the endpoint in a Kestra secret if it contains credentials or other sensitive connection data.
+Set `serverUrl` to the resulting endpoint, such as `ws://playwright:3000/`, or use `wss://` when the server is behind TLS. Store the endpoint in a Kestra secret if it contains credentials or other sensitive connection data.
 
 When upgrading Playwright, update the Java dependency, Docker image tag, `npx` package version, examples, and documentation together.
 
@@ -28,7 +28,7 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 | `FILL` | `selector`, `value` | Replaces an input value. The rendered value is never logged. |
 | `PRESS` | `selector`, `key` | Sends a key or shortcut such as `Enter` or `Control+A`. |
 | `WAIT_FOR` | `selector` | Waits until the matching element is visible. |
-| `SCREENSHOT` | `name`, optional `fullPage` | Stores a PNG in Kestra internal storage. |
+| `SCREENSHOT` | `name`, optional `fullPage` | Stores a PNG in Kestra internal storage. `name` cannot contain `/`, `\`, or `..`. |
 | `ASSERT_VISIBLE` | `selector` | Waits for the matching element to be visible. |
 | `ASSERT_TEXT` | `selector`, `text`, optional `regex` | Waits for the element text to equal a string or match a Java regular expression. |
 | `ASSERT_URL` | `url`, optional `regex` | Waits for the page URL to equal a string or match a Java regular expression. |
@@ -47,6 +47,8 @@ Tracing supports three modes:
 - `ON_FAILURE` records a trace and stores it only when an action fails. This is the default.
 - `ALWAYS` stores a trace for successful and failed checks. Successful trace URIs are returned in the `trace` output.
 - `OFF` disables traces. Failure screenshots are still captured.
+
+Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace. Failure screenshots are still captured.
 
 Open a downloaded trace with the [Playwright Trace Viewer](https://trace.playwright.dev/).
 

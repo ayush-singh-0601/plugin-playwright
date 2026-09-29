@@ -14,7 +14,7 @@ The task supports Chromium, Firefox, and WebKit with these actions:
 - `ASSERT_VISIBLE`, `ASSERT_TEXT`, `ASSERT_URL`, and `ASSERT_TITLE`
 - `SCREENSHOT`
 
-Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, unless tracing is disabled, a Playwright trace. Failure messages identify the action, selector, expected value, actual value, and artifact locations.
+Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when the flow has no `FILL` or `PRESS` action, a Playwright trace. Failure messages identify the action, selector, expected value, actual value, and artifact locations.
 
 ## Start a Playwright server
 
@@ -25,7 +25,9 @@ docker run --rm -p 3000:3000 mcr.microsoft.com/playwright:v1.63.0-noble \
   npx -y playwright@1.63.0 run-server --port 3000 --host 0.0.0.0
 ```
 
-The WebSocket endpoint is `ws://localhost:3000/`. Store it as a Kestra secret for shared environments.
+The WebSocket endpoint is `ws://localhost:3000/`; use `wss://` when the server is behind TLS. Store it as a Kestra secret for shared environments.
+
+The worker starts a local Playwright Node driver for each run, but browsers run on the remote server. The shaded JAR includes Linux x64 and ARM64 drivers only, so this build requires a Linux worker. Browser downloads are disabled on the worker.
 
 ## Example
 

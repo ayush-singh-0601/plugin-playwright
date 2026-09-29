@@ -30,7 +30,6 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import org.slf4j.Logger;
 
-import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -52,7 +51,8 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
     description = """
         Connects to a remote Playwright 1.63.0 server, opens one browser context, and runs an
         ordered list of browser actions and web-first assertions. A failed action stores a
-        full-page screenshot and, by default, a Playwright trace in Kestra internal storage.
+        full-page screenshot and, when actions contain no `FILL` or `PRESS`, a Playwright trace
+        in Kestra internal storage.
         The server and Java client must use the same Playwright version.
         """
 )
@@ -138,7 +138,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @Schema(
         title = "Playwright server URL",
         description = """
-            WebSocket endpoint of a remote Playwright server. Run the matching server with
+            `ws://` or `wss://` endpoint of a remote Playwright server. Run the matching server with
             `mcr.microsoft.com/playwright:v1.63.0-noble` and
             `npx -y playwright@1.63.0 run-server --port 3000 --host 0.0.0.0`.
             """
@@ -158,9 +158,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @NotNull
     @PluginProperty(group = "main")
     @ToString.Exclude
-    // PropertyValueExtractor cascades into action values, but collection constraints on this
-    // wrapped list are incorrectly evaluated as empty during flow validation. Keep the
-    // non-empty check in run() so populated YAML action lists can be saved successfully.
+    // Check the rendered list in run(); @NotEmpty rejects populated Property lists during flow validation.
     private Property<List<@Valid Action>> actions;
 
     @Schema(
@@ -181,7 +179,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     @Schema(
         title = "Trace mode",
-        description = "Controls trace recording: `OFF`, `ON_FAILURE` (default), or `ALWAYS`."
+        description = """
+            Controls trace recording: `OFF`, `ON_FAILURE` (default), or `ALWAYS`. Tracing is
+            disabled for runs containing `FILL` or `PRESS` actions because traces can expose
+            their values. Other traces may contain page content and URLs; use `OFF` for sensitive pages.
+            """
     )
     @NotNull
     @Builder.Default
@@ -224,7 +226,10 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         TraceRecorder traceRecorder = null;
 
         try {
-            var resources = new SessionResources(Playwright.create(), runContext.logger());
+            var resources = new SessionResources(
+                Playwright.create(new Playwright.CreateOptions().setEnv(Map.of("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1"))),
+                runContext.logger()
+            );
             activeSession.set(resources);
             checkKilled();
 
@@ -234,6 +239,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                     new BrowserType.ConnectOptions().setTimeout(rTimeout.toMillis())
                 );
             } catch (RuntimeException e) {
+                checkKilled();
                 throw new IllegalStateException(
                     "Could not connect to the Playwright " + rBrowser + " server. Confirm it is reachable and runs Playwright "
                         + PLAYWRIGHT_VERSION + ": " + shortMessage(e).replace(rServerUrl, "<serverUrl>")
@@ -242,7 +248,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             checkKilled();
 
             var context = resources.browser.newContext();
-            if (rTrace != TraceMode.OFF) {
+            if (rTrace != TraceMode.OFF && rActions.stream().noneMatch(Check::entersSensitiveInput)) {
                 traceRecorder = new TraceRecorder(context);
                 traceRecorder.start();
             }
@@ -259,7 +265,9 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 try {
                     execute(action, page, runContext, screenshots, rBaseUrl, rTimeout);
                 } catch (Exception | AssertionError e) {
+                    checkKilled();
                     var artifacts = captureFailureArtifacts(page, traceRecorder, runContext, index);
+                    checkKilled();
                     throw actionFailure(index, action, page, e, artifacts);
                 }
             }
@@ -306,7 +314,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 page,
                 runContext,
                 screenshots,
-                required(action.name, "name for SCREENSHOT"),
+                screenshotName(required(action.name, "name for SCREENSHOT")),
                 Boolean.TRUE.equals(action.fullPage)
             );
             case ASSERT_VISIBLE -> assertThat(page.locator(required(action.selector, "selector for ASSERT_VISIBLE")))
@@ -351,8 +359,9 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         String name,
         boolean fullPage
     ) throws Exception {
-        var bytes = page.screenshot(new Page.ScreenshotOptions().setFullPage(fullPage));
-        var uri = runContext.storage().putFile(new ByteArrayInputStream(bytes), name);
+        var path = runContext.workingDir().createTempFile(".png");
+        page.screenshot(new Page.ScreenshotOptions().setFullPage(fullPage).setPath(path));
+        var uri = runContext.storage().putFile(path.toFile(), name);
 
         if (screenshots.put(name, uri) != null) {
             runContext.logger().warn("Screenshot '{}' was replaced by a later action with the same name", name);
@@ -370,8 +379,9 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
         try {
             var name = "failure-action-" + actionIndex + ".png";
-            var bytes = page.screenshot(new Page.ScreenshotOptions().setFullPage(true));
-            screenshotUri = runContext.storage().putFile(new ByteArrayInputStream(bytes), name);
+            var path = runContext.workingDir().createTempFile(".png");
+            page.screenshot(new Page.ScreenshotOptions().setFullPage(true).setPath(path));
+            screenshotUri = runContext.storage().putFile(path.toFile(), name);
         } catch (Exception e) {
             runContext.logger().warn("Could not store the failure screenshot: {}", shortMessage(e));
         }
@@ -402,14 +412,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         var screenshot = artifacts.screenshot() == null ? "unavailable" : artifacts.screenshot().toString();
         var failureTrace = artifacts.trace() == null ? "unavailable" : artifacts.trace().toString();
 
-        return new IllegalStateException(
-            "Action " + index + id + " [" + actionName + "] failed" + selector
+        var message = "Action " + index + id + " [" + actionName + "] failed" + selector
                 + "; expected: " + expected
                 + "; actual: " + actual
                 + "; screenshot: " + screenshot
-                + "; trace: " + failureTrace,
-            cause
-        );
+                + "; trace: " + failureTrace;
+        return entersSensitiveInput(action) ? new IllegalStateException(message) : new IllegalStateException(message, cause);
     }
 
     private String expected(Action action) {
@@ -444,11 +452,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                     var locator = page.locator(action.selector);
                     yield locator.count() == 0
                         ? "no element matched the selector"
-                        : "text '" + locator.first().textContent(new Locator.TextContentOptions().setTimeout(1_000)) + "'";
+                        : "text '" + truncate(locator.first().textContent(new Locator.TextContentOptions().setTimeout(1_000))) + "'";
                 }
                 case ASSERT_URL -> "URL '" + page.url() + "'";
                 case ASSERT_TITLE -> "title '" + page.title() + "'";
                 case FILL -> "the input could not be filled";
+                case PRESS -> "the key could not be pressed";
                 default -> shortMessage(cause);
             };
         } catch (Exception e) {
@@ -500,6 +509,21 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         return message.lines().findFirst().orElse(message).strip();
     }
 
+    static String screenshotName(String name) {
+        if (name.contains("/") || name.contains("\\") || name.contains("..")) {
+            throw new IllegalArgumentException("screenshot name must not contain '/', '\\', or '..'");
+        }
+        return name;
+    }
+
+    private static String truncate(String text) {
+        return text == null || text.length() <= 200 ? text : text.substring(0, 200) + "...";
+    }
+
+    private static boolean entersSensitiveInput(Action action) {
+        return action != null && (action.action == ActionType.FILL || action.action == ActionType.PRESS);
+    }
+
     private void checkKilled() {
         if (killed.get()) {
             throw new KilledException();
@@ -515,7 +539,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     @Override
     public void stop() {
-        closeActiveSessionAsync();
+        kill();
     }
 
     private void closeActiveSessionAsync() {
@@ -611,10 +635,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         private String value;
 
         @Schema(title = "Key", description = "Keyboard key or shortcut sent by `PRESS`, such as `Enter` or `Control+A`.")
-        @PluginProperty(group = "main")
+        @PluginProperty(group = "main", secret = true)
+        @ToString.Exclude
         private String key;
 
-        @Schema(title = "Screenshot name", description = "Internal storage filename used by `SCREENSHOT`.")
+        @Schema(title = "Screenshot name", description = "Internal storage filename used by `SCREENSHOT`; cannot contain `/`, `\\`, or `..`.")
         @PluginProperty(group = "destination")
         private String name;
 
@@ -644,7 +669,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @Builder.Default
         private Map<String, URI> screenshots = new LinkedHashMap<>();
 
-        @Schema(title = "Trace", description = "Playwright trace URI when `trace` is `ALWAYS`; failure trace URIs are included in error messages.")
+        @Schema(title = "Trace", description = "Playwright trace URI when `trace` is `ALWAYS` and no `FILL` or `PRESS` action is present; failure trace URIs are included in error messages.")
         private URI trace;
     }
 
