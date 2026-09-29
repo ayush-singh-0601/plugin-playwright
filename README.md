@@ -14,7 +14,7 @@ The task supports Chromium, Firefox, and WebKit with these actions:
 - `ASSERT_VISIBLE`, `ASSERT_TEXT`, `ASSERT_URL`, and `ASSERT_TITLE`
 - `SCREENSHOT`
 
-Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when the flow has no `FILL` or `PRESS` action, a Playwright trace. Failure messages identify the action, selector, expected value, actual value, and artifact locations.
+Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when the flow has no `FILL` or `PRESS` action, a Playwright trace. A warning is logged when a requested trace is suppressed. Failure screenshots may show entered non-password values, so limit access to stored artifacts. Failure messages identify the action and artifact locations while omitting sensitive parts of URLs.
 
 ## Start a Playwright server
 

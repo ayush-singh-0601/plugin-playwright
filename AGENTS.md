@@ -49,6 +49,8 @@ plugin-playwright/
 ├── src/main/java/io/kestra/plugin/playwright/Check.java
 ├── src/main/resources/doc/io.kestra.plugin.playwright.md
 ├── src/test/java/io/kestra/plugin/playwright/CheckTest.java
+├── src/test/java/io/kestra/plugin/playwright/CheckUnitTest.java
+├── src/test/java/io/kestra/plugin/playwright/CheckValidationTest.java
 ├── build.gradle
 └── README.md
 ```

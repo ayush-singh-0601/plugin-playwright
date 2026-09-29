@@ -1,5 +1,6 @@
 package io.kestra.plugin.playwright;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.microsoft.playwright.BrowserContext;
 import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Locator;
@@ -8,7 +9,6 @@ import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Tracing;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.assertions.PageAssertions;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.kestra.core.exceptions.KilledException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
@@ -31,6 +31,7 @@ import lombok.experimental.SuperBuilder;
 import org.slf4j.Logger;
 
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -181,8 +182,8 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         title = "Trace mode",
         description = """
             Controls trace recording: `OFF`, `ON_FAILURE` (default), or `ALWAYS`. Tracing is
-            disabled for runs containing `FILL` or `PRESS` actions because traces can expose
-            their values. Other traces may contain page content and URLs; use `OFF` for sensitive pages.
+            disabled with a warning for runs containing `FILL` or `PRESS` actions because traces
+            can expose their values. Other traces may contain page content and URLs; use `OFF` for sensitive pages.
             """
     )
     @NotNull
@@ -220,16 +221,18 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             throw new IllegalArgumentException("timeout must be between PT0.001S and PT10M");
         }
         checkKilled();
+        validateActions(rActions, rBaseUrl);
+        var suppressTrace = rTrace != TraceMode.OFF && rActions.stream().anyMatch(Check::entersSensitiveInput);
+        if (suppressTrace) {
+            runContext.logger().warn("Playwright tracing is disabled for this run because its actions contain FILL or PRESS; no trace will be stored");
+        }
 
         var screenshots = new LinkedHashMap<String, URI>();
         URI traceUri = null;
         TraceRecorder traceRecorder = null;
 
         try {
-            var resources = new SessionResources(
-                Playwright.create(new Playwright.CreateOptions().setEnv(Map.of("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1"))),
-                runContext.logger()
-            );
+            var resources = new SessionResources(createPlaywright(), runContext.logger());
             activeSession.set(resources);
             checkKilled();
 
@@ -242,13 +245,13 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 checkKilled();
                 throw new IllegalStateException(
                     "Could not connect to the Playwright " + rBrowser + " server. Confirm it is reachable and runs Playwright "
-                        + PLAYWRIGHT_VERSION + ": " + shortMessage(e).replace(rServerUrl, "<serverUrl>")
+                        + PLAYWRIGHT_VERSION + "."
                 );
             }
             checkKilled();
 
             var context = resources.browser.newContext();
-            if (rTrace != TraceMode.OFF && rActions.stream().noneMatch(Check::entersSensitiveInput)) {
+            if (rTrace != TraceMode.OFF && !suppressTrace) {
                 traceRecorder = new TraceRecorder(context);
                 traceRecorder.start();
             }
@@ -282,8 +285,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 .screenshots(screenshots)
                 .trace(traceUri)
                 .build();
+        } catch (Exception | AssertionError e) {
+            checkKilled();
+            throw e;
         } finally {
-            if (traceRecorder != null) {
+            if (traceRecorder != null && !killed.get()) {
                 traceRecorder.discard(runContext.logger());
             }
             closeActiveSession();
@@ -325,6 +331,60 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 required(action.title, "title for ASSERT_TITLE"),
                 new PageAssertions.HasTitleOptions().setTimeout(timeoutMillis)
             );
+        }
+    }
+
+    private Playwright createPlaywright() {
+        try {
+            return Playwright.create(new Playwright.CreateOptions().setEnv(Map.of("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")));
+        } catch (RuntimeException e) {
+            checkKilled();
+            throw new IllegalStateException(
+                "Could not start the Playwright driver. This plugin requires a Linux x64 or ARM64 worker."
+            );
+        }
+    }
+
+    static void validateActions(List<Action> actions, String baseUrl) {
+        for (var index = 0; index < actions.size(); index++) {
+            var action = required(actions.get(index), "actions[" + index + "]");
+            var type = required(action.action, "actions[" + index + "].action");
+            var prefix = "actions[" + index + "].";
+            switch (type) {
+                case NAVIGATE -> resolveUrl(required(action.url, prefix + "url"), baseUrl);
+                case CLICK, WAIT_FOR, ASSERT_VISIBLE -> required(action.selector, prefix + "selector for " + type);
+                case FILL -> {
+                    required(action.selector, prefix + "selector for FILL");
+                    required(action.value, prefix + "value for FILL");
+                }
+                case PRESS -> {
+                    required(action.selector, prefix + "selector for PRESS");
+                    required(action.key, prefix + "key for PRESS");
+                }
+                case SCREENSHOT -> screenshotName(required(action.name, prefix + "name for SCREENSHOT"));
+                case ASSERT_TEXT -> {
+                    required(action.selector, prefix + "selector for ASSERT_TEXT");
+                    required(action.text, prefix + "text for ASSERT_TEXT");
+                    if (Boolean.TRUE.equals(action.regex)) {
+                        validatePattern(action.text, prefix + "text");
+                    }
+                }
+                case ASSERT_URL -> {
+                    required(action.url, prefix + "url for ASSERT_URL");
+                    if (Boolean.TRUE.equals(action.regex)) {
+                        validatePattern(action.url, prefix + "url");
+                    }
+                }
+                case ASSERT_TITLE -> required(action.title, prefix + "title for ASSERT_TITLE");
+            }
+        }
+    }
+
+    private static void validatePattern(String value, String field) {
+        try {
+            Pattern.compile(value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(field + " must be a valid regular expression");
         }
     }
 
@@ -417,7 +477,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 + "; actual: " + actual
                 + "; screenshot: " + screenshot
                 + "; trace: " + failureTrace;
-        return entersSensitiveInput(action) ? new IllegalStateException(message) : new IllegalStateException(message, cause);
+        return new IllegalStateException(message);
     }
 
     private String expected(Action action) {
@@ -431,10 +491,10 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 ? "text matching /" + action.text + "/"
                 : "text '" + action.text + "'";
             case ASSERT_URL -> Boolean.TRUE.equals(action.regex)
-                ? "URL matching /" + action.url + "/"
-                : "URL '" + action.url + "'";
+                ? "URL matching /" + safeUrl(action.url) + "/"
+                : "URL '" + safeUrl(action.url) + "'";
             case ASSERT_TITLE -> "title '" + action.title + "'";
-            case NAVIGATE -> "navigation to '" + action.url + "' to succeed";
+            case NAVIGATE -> "navigation to '" + safeUrl(action.url) + "' to succeed";
             case SCREENSHOT -> "screenshot '" + action.name + "' to be stored";
             default -> "action to complete successfully";
         };
@@ -442,7 +502,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     private String actual(Action action, Page page, Throwable cause) {
         if (action.action == null) {
-            return shortMessage(cause);
+            return cause.getClass().getSimpleName();
         }
 
         try {
@@ -454,27 +514,72 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                         ? "no element matched the selector"
                         : "text '" + truncate(locator.first().textContent(new Locator.TextContentOptions().setTimeout(1_000))) + "'";
                 }
-                case ASSERT_URL -> "URL '" + page.url() + "'";
+                case ASSERT_URL -> "URL '" + safeUrl(page.url()) + "'";
                 case ASSERT_TITLE -> "title '" + page.title() + "'";
                 case FILL -> "the input could not be filled";
                 case PRESS -> "the key could not be pressed";
-                default -> shortMessage(cause);
+                case NAVIGATE -> "navigation failed";
+                default -> cause.getClass().getSimpleName();
             };
         } catch (Exception e) {
-            return shortMessage(cause);
+            return cause.getClass().getSimpleName();
         }
     }
 
     static String resolveUrl(String url, String rBaseUrl) {
-        var target = URI.create(url);
-        if (target.isAbsolute()) {
-            return target.toString();
-        }
-        if (rBaseUrl == null || rBaseUrl.isBlank()) {
-            throw new IllegalArgumentException("baseUrl is required when NAVIGATE uses a relative URL: " + url);
+        final URI target;
+        try {
+            target = URI.create(url);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("url for NAVIGATE is invalid: " + safeUrl(url));
         }
 
-        return URI.create(rBaseUrl).resolve(target).toString();
+        URI resolved = target;
+        if (!target.isAbsolute()) {
+            if (rBaseUrl == null || rBaseUrl.isBlank()) {
+                throw new IllegalArgumentException("baseUrl is required when NAVIGATE uses a relative url");
+            }
+            final URI base;
+            try {
+                base = URI.create(rBaseUrl);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("baseUrl must be a valid HTTP or HTTPS URL");
+            }
+            if (!base.isAbsolute() || !isHttpScheme(base.getScheme())) {
+                throw new IllegalArgumentException("baseUrl must be an absolute HTTP or HTTPS URL");
+            }
+            resolved = base.resolve(target);
+        }
+        var scheme = resolved.getScheme();
+        if (!isHttpScheme(scheme) && !"data".equalsIgnoreCase(scheme)) {
+            throw new IllegalArgumentException("url for NAVIGATE must use http, https, or data");
+        }
+        return resolved.toString();
+    }
+
+    static String safeUrl(String url) {
+        if (url == null) {
+            return "<unavailable>";
+        }
+        try {
+            var uri = URI.create(url);
+            if (uri.isOpaque()) {
+                return uri.getScheme() + ":<redacted>";
+            }
+            if (uri.getHost() != null) {
+                return new URI(uri.getScheme(), null, uri.getHost(), uri.getPort(), uri.getPath(), null, null).toString();
+            }
+            if (uri.getScheme() == null && uri.getRawAuthority() == null) {
+                return new URI(null, null, uri.getPath(), null, null).toString();
+            }
+        } catch (IllegalArgumentException | URISyntaxException ignored) {
+            // Invalid or pattern-based URLs are intentionally omitted from failure messages.
+        }
+        return "<redacted URL>";
+    }
+
+    private static boolean isHttpScheme(String scheme) {
+        return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
     }
 
     private BrowserType browserType(Playwright playwright, Browser rBrowser) {
@@ -621,7 +726,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @PluginProperty(group = "main")
         private String id;
 
-        @Schema(title = "URL", description = "Target for `NAVIGATE` or expected URL for `ASSERT_URL`.")
+        @Schema(title = "URL", description = "HTTP, HTTPS, or data target for `NAVIGATE`, or expected URL for `ASSERT_URL`.")
         @PluginProperty(group = "main")
         private String url;
 
@@ -669,7 +774,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @Builder.Default
         private Map<String, URI> screenshots = new LinkedHashMap<>();
 
-        @Schema(title = "Trace", description = "Playwright trace URI when `trace` is `ALWAYS` and no `FILL` or `PRESS` action is present; failure trace URIs are included in error messages.")
+        @Schema(title = "Trace", description = "Playwright trace URI when `trace` is `ALWAYS` and no `FILL` or `PRESS` action is present. A warning is logged when tracing is suppressed; failure trace URIs are included in error messages.")
         private URI trace;
     }
 

@@ -23,7 +23,7 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 
 | Action | Fields | Behavior |
 | --- | --- | --- |
-| `NAVIGATE` | `url` | Opens an absolute URL, or resolves a relative URL against `baseUrl`. |
+| `NAVIGATE` | `url` | Opens an HTTP, HTTPS, or data URL, or resolves a relative URL against `baseUrl`. Use a trusted Playwright server for pages with sensitive data. |
 | `CLICK` | `selector` | Clicks the matching element. |
 | `FILL` | `selector`, `value` | Replaces an input value. The rendered value is never logged. |
 | `PRESS` | `selector`, `key` | Sends a key or shortcut such as `Enter` or `Control+A`. |
@@ -48,7 +48,7 @@ Tracing supports three modes:
 - `ALWAYS` stores a trace for successful and failed checks. Successful trace URIs are returned in the `trace` output.
 - `OFF` disables traces. Failure screenshots are still captured.
 
-Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace. Failure screenshots are still captured.
+Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. The task logs a warning when it suppresses a requested trace. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace. Failure screenshots are still captured and may show entered non-password values; limit access to stored artifacts.
 
 Open a downloaded trace with the [Playwright Trace Viewer](https://trace.playwright.dev/).
 

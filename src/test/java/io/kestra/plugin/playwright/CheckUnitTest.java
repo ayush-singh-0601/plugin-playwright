@@ -27,6 +27,21 @@ class CheckUnitTest {
     }
 
     @Test
+    void shouldRejectUnsafeNavigationSchemesAndNameInvalidUrls() {
+        assertThat(assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("file:///etc/passwd", null)).getMessage(),
+            containsString("http, https, or data"));
+        assertThat(assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("http://bad host", null)).getMessage(),
+            containsString("url for NAVIGATE is invalid"));
+    }
+
+    @Test
+    void shouldRedactSensitivePartsOfUrls() {
+        assertThat(Check.safeUrl("https://user:password@example.com/path?code=secret#fragment"), is("https://example.com/path"));
+        assertThat(Check.safeUrl("/login?token=secret#fragment"), is("/login"));
+        assertThat(Check.safeUrl("data:text/html,secret"), is("data:<redacted>"));
+    }
+
+    @Test
     void shouldExcludeFillValuesFromGeneratedStrings() {
         var action = Check.Action.builder()
             .action(Check.ActionType.FILL)
