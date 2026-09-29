@@ -30,7 +30,7 @@ The worker runs the Playwright Java client. Browsers run on a remote Playwright 
 
 - One Playwright connection, browser, browser context, and page are created per task run.
 - Actions execute sequentially in the same context.
-- `kill()` and `stop()` close the remote browser and Playwright connection.
+- `kill()` closes the session and marks the run killed; `stop()` closes it for worker shutdown without marking it killed.
 - Rendered `FILL` values must never be logged.
 
 ### Development server

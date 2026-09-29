@@ -3,12 +3,14 @@ package io.kestra.plugin.playwright;
 import io.kestra.core.models.property.Property;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CheckUnitTest {
@@ -64,5 +66,38 @@ class CheckUnitTest {
             assertThrows(IllegalArgumentException.class, () -> Check.screenshotName(name));
         }
         assertThat(Check.screenshotName("capture.png"), is("capture.png"));
+    }
+
+    @Test
+    void shouldKeepTaskTimeoutSeparateFromActionTimeout() {
+        var task = Check.builder()
+            .id("timeout-check")
+            .type(Check.class.getName())
+            .actions(Property.ofValue(List.of(Check.Action.builder().action(Check.ActionType.ASSERT_TITLE).title("Ready").build())))
+            .build();
+
+        assertThat(task.getTimeout(), nullValue());
+        assertThat(task.getActionTimeout(), is(Property.ofValue(Check.DEFAULT_ACTION_TIMEOUT)));
+
+        var boundedTask = Check.builder()
+            .id("bounded-check")
+            .type(Check.class.getName())
+            .timeout(Property.ofValue(Duration.ofMinutes(5)))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(2)))
+            .build();
+
+        assertThat(boundedTask.getTimeout(), is(Property.ofValue(Duration.ofMinutes(5))));
+        assertThat(boundedTask.getActionTimeout(), is(Property.ofValue(Duration.ofSeconds(2))));
+    }
+
+    @Test
+    void shouldRequireWebSocketServerUrlWithoutEchoingCredentials() {
+        assertThat(Check.validateServerUrl("ws://localhost:3000/"), is("ws://localhost:3000/"));
+        assertThat(Check.validateServerUrl("wss://example.com/playwright"), is("wss://example.com/playwright"));
+        for (var url : List.of("http://example.com/", "file:///tmp/socket", "ws://user:secret@bad host/")) {
+            var exception = assertThrows(IllegalArgumentException.class, () -> Check.validateServerUrl(url));
+            assertThat(exception.getMessage(), containsString("ws:// or wss://"));
+            assertThat(exception.getMessage(), not(containsString("secret")));
+        }
     }
 }

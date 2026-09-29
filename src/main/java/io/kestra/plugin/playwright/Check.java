@@ -133,8 +133,8 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
 )
 public class Check extends Task implements RunnableTask<Check.Output> {
     static final String PLAYWRIGHT_VERSION = "1.63.0";
-    static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
-    static final Duration MAX_TIMEOUT = Duration.ofMinutes(10);
+    static final Duration DEFAULT_ACTION_TIMEOUT = Duration.ofSeconds(30);
+    static final Duration MAX_ACTION_TIMEOUT = Duration.ofMinutes(10);
 
     @Schema(
         title = "Playwright server URL",
@@ -176,7 +176,18 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @NotNull
     @Builder.Default
     @PluginProperty(group = "reliability")
-    private Property<Duration> timeout = Property.ofValue(DEFAULT_TIMEOUT);
+    private Property<Duration> actionTimeout = Property.ofValue(DEFAULT_ACTION_TIMEOUT);
+
+    @Schema(
+        title = "Failure screenshot",
+        description = """
+            Captures a full-page screenshot when an action fails. By default this is disabled for
+            runs containing `FILL` or `PRESS`, because entered values may appear in the image.
+            Set to `true` to opt in for those runs, or `false` to disable failure screenshots.
+            """
+    )
+    @PluginProperty(group = "reliability")
+    private Property<Boolean> failureScreenshot;
 
     @Schema(
         title = "Trace mode",
@@ -205,26 +216,39 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @ToString.Exclude
     private final AtomicBoolean killed = new AtomicBoolean(false);
 
+    @Builder.Default
+    @JsonIgnore
+    @Getter(AccessLevel.NONE)
+    @EqualsAndHashCode.Exclude
+    @ToString.Exclude
+    private final AtomicBoolean stopped = new AtomicBoolean(false);
+
     @Override
     public Output run(RunContext runContext) throws Exception {
-        var rServerUrl = required(runContext.render(serverUrl).as(String.class).orElse(null), "serverUrl");
+        var rServerUrl = validateServerUrl(required(runContext.render(serverUrl).as(String.class).orElse(null), "serverUrl"));
         var rBrowser = runContext.render(browser).as(Browser.class).orElse(Browser.CHROMIUM);
         var rActions = runContext.render(actions).asList(Action.class);
         var rBaseUrl = runContext.render(baseUrl).as(String.class).orElse(null);
-        var rTimeout = runContext.render(timeout).as(Duration.class).orElse(DEFAULT_TIMEOUT);
+        var rTimeout = runContext.render(actionTimeout).as(Duration.class).orElse(DEFAULT_ACTION_TIMEOUT);
         var rTrace = runContext.render(trace).as(TraceMode.class).orElse(TraceMode.ON_FAILURE);
 
         if (rActions.isEmpty()) {
             throw new IllegalArgumentException("actions must contain at least one browser action");
         }
-        if (rTimeout.isZero() || rTimeout.isNegative() || rTimeout.compareTo(MAX_TIMEOUT) > 0) {
-            throw new IllegalArgumentException("timeout must be between PT0.001S and PT10M");
+        if (rTimeout.isZero() || rTimeout.isNegative() || rTimeout.compareTo(MAX_ACTION_TIMEOUT) > 0) {
+            throw new IllegalArgumentException("actionTimeout must be between PT0.001S and PT10M");
         }
         checkKilled();
+        checkStopped();
         validateActions(rActions, rBaseUrl);
-        var suppressTrace = rTrace != TraceMode.OFF && rActions.stream().anyMatch(Check::entersSensitiveInput);
+        var sensitiveInput = rActions.stream().anyMatch(Check::entersSensitiveInput);
+        var suppressTrace = rTrace != TraceMode.OFF && sensitiveInput;
+        var rFailureScreenshot = runContext.render(failureScreenshot).as(Boolean.class).orElse(!sensitiveInput);
         if (suppressTrace) {
             runContext.logger().warn("Playwright tracing is disabled for this run because its actions contain FILL or PRESS; no trace will be stored");
+        }
+        if (sensitiveInput && !rFailureScreenshot) {
+            runContext.logger().warn("Failure screenshots are disabled for this run because its actions contain FILL or PRESS");
         }
 
         var screenshots = new LinkedHashMap<String, URI>();
@@ -235,6 +259,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             var resources = new SessionResources(createPlaywright(), runContext.logger());
             activeSession.set(resources);
             checkKilled();
+            checkStopped();
 
             try {
                 resources.browser = browserType(resources.playwright, rBrowser).connect(
@@ -243,12 +268,14 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 );
             } catch (RuntimeException e) {
                 checkKilled();
+                checkStopped();
                 throw new IllegalStateException(
                     "Could not connect to the Playwright " + rBrowser + " server. Confirm it is reachable and runs Playwright "
                         + PLAYWRIGHT_VERSION + "."
                 );
             }
             checkKilled();
+            checkStopped();
 
             var context = resources.browser.newContext();
             if (rTrace != TraceMode.OFF && !suppressTrace) {
@@ -262,6 +289,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
             for (var index = 0; index < rActions.size(); index++) {
                 checkKilled();
+                checkStopped();
                 var action = required(rActions.get(index), "action at index " + index);
                 logAction(runContext.logger(), index, action);
 
@@ -269,8 +297,10 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                     execute(action, page, runContext, screenshots, rBaseUrl, rTimeout);
                 } catch (Exception | AssertionError e) {
                     checkKilled();
-                    var artifacts = captureFailureArtifacts(page, traceRecorder, runContext, index);
+                    checkStopped();
+                    var artifacts = captureFailureArtifacts(page, traceRecorder, runContext, index, rFailureScreenshot);
                     checkKilled();
+                    checkStopped();
                     throw actionFailure(index, action, page, e, artifacts);
                 }
             }
@@ -281,15 +311,18 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 traceRecorder.discard(runContext.logger());
             }
 
+            checkKilled();
+            checkStopped();
             return Output.builder()
                 .screenshots(screenshots)
                 .trace(traceUri)
                 .build();
         } catch (Exception | AssertionError e) {
             checkKilled();
+            checkStopped();
             throw e;
         } finally {
-            if (traceRecorder != null && !killed.get()) {
+            if (traceRecorder != null && !killed.get() && !stopped.get()) {
                 traceRecorder.discard(runContext.logger());
             }
             closeActiveSession();
@@ -432,18 +465,21 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         Page page,
         TraceRecorder traceRecorder,
         RunContext runContext,
-        int actionIndex
+        int actionIndex,
+        boolean failureScreenshot
     ) {
         URI screenshotUri = null;
         URI failureTraceUri = null;
 
-        try {
-            var name = "failure-action-" + actionIndex + ".png";
-            var path = runContext.workingDir().createTempFile(".png");
-            page.screenshot(new Page.ScreenshotOptions().setFullPage(true).setPath(path));
-            screenshotUri = runContext.storage().putFile(path.toFile(), name);
-        } catch (Exception e) {
-            runContext.logger().warn("Could not store the failure screenshot: {}", shortMessage(e));
+        if (failureScreenshot) {
+            try {
+                var name = "failure-action-" + actionIndex + ".png";
+                var path = runContext.workingDir().createTempFile(".png");
+                page.screenshot(new Page.ScreenshotOptions().setFullPage(true).setPath(path));
+                screenshotUri = runContext.storage().putFile(path.toFile(), name);
+            } catch (Exception e) {
+                runContext.logger().warn("Could not store the failure screenshot: {}", shortMessage(e));
+            }
         }
 
         if (traceRecorder != null) {
@@ -557,6 +593,19 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         return resolved.toString();
     }
 
+    static String validateServerUrl(String serverUrl) {
+        try {
+            var uri = URI.create(serverUrl);
+            var scheme = uri.getScheme();
+            if (("ws".equalsIgnoreCase(scheme) || "wss".equalsIgnoreCase(scheme)) && uri.getHost() != null) {
+                return serverUrl;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Do not include the URL in the error: it may contain credentials or tokens.
+        }
+        throw new IllegalArgumentException("serverUrl must be an absolute ws:// or wss:// URL with a host");
+    }
+
     static String safeUrl(String url) {
         if (url == null) {
             return "<unavailable>";
@@ -635,6 +684,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         }
     }
 
+    private void checkStopped() {
+        if (stopped.get()) {
+            throw new IllegalStateException("Playwright check stopped during worker shutdown");
+        }
+    }
+
     @Override
     public void kill() {
         if (killed.compareAndSet(false, true)) {
@@ -644,7 +699,8 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     @Override
     public void stop() {
-        kill();
+        stopped.set(true);
+        closeActiveSessionAsync();
     }
 
     private void closeActiveSessionAsync() {

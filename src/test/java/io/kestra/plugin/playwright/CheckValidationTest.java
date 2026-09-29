@@ -37,6 +37,8 @@ class CheckValidationTest {
               - id: check
                 type: io.kestra.plugin.playwright.Check
                 serverUrl: "{{ secret('PLAYWRIGHT_SERVER_URL') }}"
+                timeout: PT5M
+                actionTimeout: PT1S
                 actions:
                   - action: NAVIGATE
                     url: https://example.com
@@ -77,7 +79,7 @@ class CheckValidationTest {
             .serverUrl(Property.ofValue("ws://user:password@127.0.0.1:1/?token=" + secret))
             .actions(Property.ofValue(List.of(Check.Action.builder()
                 .action(Check.ActionType.NAVIGATE).url("data:text/html,hello").build())))
-            .timeout(Property.ofValue(Duration.ofSeconds(1)))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
             .build();
 
         var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
@@ -86,6 +88,38 @@ class CheckValidationTest {
         assertThat(exception.getMessage(), not(containsString(secret)));
         assertThat(exception.getMessage(), not(containsString("password")));
         assertNull(exception.getCause());
+    }
+
+    @Test
+    void shouldRejectNonWebSocketServerUrlBeforeOpeningDriver() {
+        var task = Check.builder()
+            .id("invalid-server-" + UUID.randomUUID())
+            .type(Check.class.getName())
+            .serverUrl(Property.ofValue("https://user:secret@example.com/playwright"))
+            .actions(Property.ofValue(List.of(Check.Action.builder()
+                .action(Check.ActionType.NAVIGATE).url("data:text/html,hello").build())))
+            .build();
+
+        var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContextFactory.of()));
+
+        assertThat(exception.getMessage(), containsString("serverUrl must be an absolute ws:// or wss:// URL"));
+        assertThat(exception.getMessage(), not(containsString("secret")));
+    }
+
+    @Test
+    void shouldRejectOutOfRangeActionTimeoutBeforeOpeningDriver() {
+        var task = Check.builder()
+            .id("invalid-timeout-" + UUID.randomUUID())
+            .type(Check.class.getName())
+            .serverUrl(Property.ofValue("ws://127.0.0.1:1/"))
+            .actions(Property.ofValue(List.of(Check.Action.builder()
+                .action(Check.ActionType.NAVIGATE).url("data:text/html,hello").build())))
+            .actionTimeout(Property.ofValue(Duration.ofMinutes(11)))
+            .build();
+
+        var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContextFactory.of()));
+
+        assertThat(exception.getMessage(), containsString("actionTimeout must be between"));
     }
 
     private Check task(List<Check.Action> actions) {

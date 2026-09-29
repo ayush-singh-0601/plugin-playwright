@@ -36,7 +36,7 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 
 Every action can have an `id`. When an action fails, the task message includes its zero-based index and ID, the selector when present, expected and actual values, and artifact URIs.
 
-The `timeout` property applies to each action and assertion. It defaults to `PT30S` and accepts values up to `PT10M`.
+`actionTimeout` applies to each action and assertion. It defaults to `PT30S` and accepts values up to `PT10M`. Kestra's standard `timeout` property limits the whole task run independently.
 
 ## Screenshots and traces
 
@@ -46,9 +46,13 @@ Tracing supports three modes:
 
 - `ON_FAILURE` records a trace and stores it only when an action fails. This is the default.
 - `ALWAYS` stores a trace for successful and failed checks. Successful trace URIs are returned in the `trace` output.
-- `OFF` disables traces. Failure screenshots are still captured.
+- `OFF` disables traces.
 
-Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. The task logs a warning when it suppresses a requested trace. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace. Failure screenshots are still captured and may show entered non-password values; limit access to stored artifacts.
+Quote `"OFF"` in YAML; otherwise the YAML parser may read it as a boolean.
+
+Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. The task logs a warning when it suppresses a requested trace. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace.
+
+`failureScreenshot` controls the automatic full-page screenshot after a failed action. By default it is enabled for runs without `FILL` or `PRESS` and disabled for runs containing either action. Set it to `true` to opt in for a sensitive run, or `false` to disable it. Named `SCREENSHOT` actions always capture the page when reached. Screenshots may show entered non-password values; limit access to stored artifacts.
 
 Open a downloaded trace with the [Playwright Trace Viewer](https://trace.playwright.dev/).
 

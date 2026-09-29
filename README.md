@@ -14,7 +14,9 @@ The task supports Chromium, Firefox, and WebKit with these actions:
 - `ASSERT_VISIBLE`, `ASSERT_TEXT`, `ASSERT_URL`, and `ASSERT_TITLE`
 - `SCREENSHOT`
 
-Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when the flow has no `FILL` or `PRESS` action, a Playwright trace. A warning is logged when a requested trace is suppressed. Failure screenshots may show entered non-password values, so limit access to stored artifacts. Failure messages identify the action and artifact locations while omitting sensitive parts of URLs.
+Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when requested, a Playwright trace for runs without `FILL` or `PRESS`. Automatic failure screenshots and traces are suppressed for runs with either action; `failureScreenshot: true` explicitly enables failure screenshots for those runs. Screenshots may show entered values, so limit access to stored artifacts. Failure messages identify the action and artifact locations while omitting sensitive parts of URLs.
+
+Use `actionTimeout` to limit each browser action (default `PT30S`); Kestra's standard `timeout` limits the whole task.
 
 ## Start a Playwright server
 

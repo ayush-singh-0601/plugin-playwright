@@ -2,10 +2,12 @@ package io.kestra.plugin.playwright;
 
 import io.kestra.core.exceptions.KilledException;
 import io.kestra.core.junit.annotations.KestraTest;
+import io.kestra.core.models.flows.Flow;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.serializers.YamlParser;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
@@ -46,12 +48,16 @@ class CheckTest {
 
     @Container
     static final GenericContainer<?> PLAYWRIGHT = new GenericContainer<>(DockerImageName.parse(IMAGE))
-        .withExposedPorts(3000)
+        .withExposedPorts(3000, 3001)
         .withCommand(
-            "npx", "-y", "playwright@1.63.0", "run-server",
-            "--port", "3000", "--host", "0.0.0.0"
+            "sh", "-c",
+            "node -e \"require('http').createServer((request, response) => {" +
+                "response.writeHead(200, {'Content-Type': 'text/html'});" +
+                "response.end('<title>Relative page</title><h1>Loaded</h1>');" +
+                "}).listen(3001, '0.0.0.0')\" & " +
+                "exec npx -y playwright@1.63.0 run-server --port 3000 --host 0.0.0.0"
         )
-        .waitingFor(Wait.forListeningPort())
+        .waitingFor(Wait.forLogMessage(".*Listening on ws://.*\\n", 1))
         .withStartupTimeout(Duration.ofMinutes(5));
 
     @Inject
@@ -134,10 +140,12 @@ class CheckTest {
             .id("relative-url-" + UUID.randomUUID())
             .type(Check.class.getName())
             .serverUrl(Property.ofValue(serverUrl()))
-            .baseUrl(Property.ofValue("http://localhost:3000/root/"))
+            .baseUrl(Property.ofValue("http://localhost:3001/root/"))
             .actions(Property.ofValue(List.of(
                 action(Check.ActionType.NAVIGATE).url("/check").build(),
-                action(Check.ActionType.ASSERT_URL).url("http://localhost:3000/check").build()
+                action(Check.ActionType.ASSERT_URL).url("http://localhost:3001/check").build(),
+                action(Check.ActionType.ASSERT_TITLE).title("Relative page").build(),
+                action(Check.ActionType.ASSERT_TEXT).selector("h1").text("Loaded").build()
             )))
             .trace(Property.ofValue(Check.TraceMode.OFF))
             .build();
@@ -158,7 +166,7 @@ class CheckTest {
                     .build()
             )))
             .trace(Property.ofValue(Check.TraceMode.OFF))
-            .timeout(Property.ofValue(Duration.ofSeconds(1)))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
             .build();
 
         var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
@@ -227,6 +235,40 @@ class CheckTest {
     }
 
     @Test
+    void shouldRenderYamlActionsWithSpecialCharactersWithoutChangingTheirStructure() throws Exception {
+        var message = "quoted \"value\" \\ path\n{\"action\":\"NAVIGATE\",\"url\":\"file:///tmp\"}";
+        var flow = YamlParser.parse("""
+            id: yaml_special_characters
+            namespace: company.team
+            tasks:
+              - id: check
+                type: io.kestra.plugin.playwright.Check
+                serverUrl: "%s"
+                trace: "OFF"
+                actions:
+                  - action: NAVIGATE
+                    url: "%s"
+                  - action: FILL
+                    selector: "#message"
+                    value: "{{ inputs.message }}"
+                  - action: ASSERT_TEXT
+                    selector: "#result"
+                    text: "{{ inputs.message }}"
+                  - action: ASSERT_TITLE
+                    title: YAML render
+            """.formatted(serverUrl(), page("""
+            <html><head><title>YAML render</title></head><body>
+              <input id='message' oninput="document.querySelector('#result').textContent = this.value" />
+              <div id='result'></div>
+            </body></html>
+            """)), Flow.class);
+        var task = (Check) flow.getTasks().getFirst();
+        var runContext = runContextFactory.of(Map.of("inputs", Map.of("message", message)));
+
+        task.run(runContext);
+    }
+
+    @Test
     void shouldKeepFailedFillValueOutOfExceptionChainAndTrace() throws Exception {
         var secret = "password-never-in-an-error";
         var task = Check.builder()
@@ -238,11 +280,12 @@ class CheckTest {
                 action(Check.ActionType.FILL).selector("#missing").value(secret).build()
             )))
             .trace(Property.ofValue(Check.TraceMode.ALWAYS))
-            .timeout(Property.ofValue(Duration.ofSeconds(1)))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
             .build();
 
         var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
 
+        assertThat(exception.getMessage(), containsString("screenshot: unavailable"));
         assertThat(exception.getMessage(), containsString("trace: unavailable"));
         for (Throwable current = exception; current != null; current = current.getCause()) {
             assertThat(current.toString(), not(containsString(secret)));
@@ -250,16 +293,59 @@ class CheckTest {
     }
 
     @Test
-    void shouldReportKillDuringActionAsKilled() throws Exception {
-        assertCancellation(Check::kill);
+    void shouldAllowExplicitFailureScreenshotForSensitiveActions() throws Exception {
+        var task = Check.builder()
+            .id("sensitive-screenshot-" + UUID.randomUUID())
+            .type(Check.class.getName())
+            .serverUrl(Property.ofValue(serverUrl()))
+            .actions(Property.ofValue(List.of(
+                action(Check.ActionType.NAVIGATE).url(page("<html><body><input id='message'/></body></html>")).build(),
+                action(Check.ActionType.FILL).selector("#message").value("visible value").build(),
+                action(Check.ActionType.ASSERT_TEXT).selector("#message").text("not this").build()
+            )))
+            .trace(Property.ofValue(Check.TraceMode.OFF))
+            .failureScreenshot(Property.ofValue(true))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
+            .build();
+        var runContext = runContextFactory.of();
+
+        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContext));
+        var matcher = Pattern.compile("screenshot: ([^;]+); trace: unavailable$").matcher(exception.getMessage());
+        assertThat(matcher.find(), is(true));
+        assertStored(runContext, URI.create(matcher.group(1)));
     }
 
     @Test
-    void shouldReportStopDuringActionAsKilled() throws Exception {
-        assertCancellation(Check::stop);
+    void shouldDisableFailureScreenshotWhenRequested() throws Exception {
+        var task = Check.builder()
+            .id("no-failure-screenshot-" + UUID.randomUUID())
+            .type(Check.class.getName())
+            .serverUrl(Property.ofValue(serverUrl()))
+            .actions(Property.ofValue(List.of(
+                action(Check.ActionType.NAVIGATE).url(page("<html><head><title>Ready</title></head></html>")).build(),
+                action(Check.ActionType.ASSERT_TITLE).title("Not ready").build()
+            )))
+            .trace(Property.ofValue(Check.TraceMode.OFF))
+            .failureScreenshot(Property.ofValue(false))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
+            .build();
+
+        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
+
+        assertThat(exception.getMessage(), containsString("screenshot: unavailable"));
     }
 
-    private void assertCancellation(Consumer<Check> cancel) throws Exception {
+    @Test
+    void shouldReportKillDuringActionAsKilled() throws Exception {
+        assertCancellation(Check::kill, true);
+    }
+
+    @Test
+    void shouldStopWithoutReportingKilled() throws Exception {
+        assertCancellation(Check::stop, false);
+    }
+
+    private void assertCancellation(Consumer<Check> cancel, boolean killed) throws Exception {
         var task = Check.builder()
             .id("cancel-check-" + UUID.randomUUID())
             .type(Check.class.getName())
@@ -268,7 +354,7 @@ class CheckTest {
                 action(Check.ActionType.WAIT_FOR).selector("#never-present").build()
             )))
             .trace(Property.ofValue(Check.TraceMode.OFF))
-            .timeout(Property.ofValue(Duration.ofSeconds(30)))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(30)))
             .build();
         var failure = new AtomicReference<Throwable>();
         var runContext = runContextFactory.of();
@@ -286,7 +372,12 @@ class CheckTest {
             cancel.accept(task);
             thread.join(15_000);
             assertThat(thread.isAlive(), is(false));
-            assertThat(failure.get(), instanceOf(KilledException.class));
+            if (killed) {
+                assertThat(failure.get(), instanceOf(KilledException.class));
+            } else {
+                assertThat(failure.get(), instanceOf(IllegalStateException.class));
+                assertThat(failure.get().getMessage(), containsString("worker shutdown"));
+            }
         } finally {
             task.kill();
         }
