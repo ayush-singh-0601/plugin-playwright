@@ -30,8 +30,10 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import org.slf4j.Logger;
 
+import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URL;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -114,7 +116,6 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
                     type: io.kestra.plugin.playwright.Check
                     serverUrl: "{{ secret('PLAYWRIGHT_SERVER_URL') }}"
                     baseUrl: https://shop.example.com
-                    trace: ALWAYS
                     actions:
                       - action: NAVIGATE
                         url: /products/demo-item
@@ -135,6 +136,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     static final String PLAYWRIGHT_VERSION = "1.63.0";
     static final Duration DEFAULT_ACTION_TIMEOUT = Duration.ofSeconds(30);
     static final Duration MAX_ACTION_TIMEOUT = Duration.ofMinutes(10);
+    private static final Pattern URL_SCHEME = Pattern.compile("^([A-Za-z][A-Za-z0-9+.-]*):");
 
     @Schema(
         title = "Playwright server URL",
@@ -155,7 +157,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @PluginProperty(group = "connection")
     private Property<Browser> browser = Property.ofValue(Browser.CHROMIUM);
 
-    @Schema(title = "Actions", description = "Ordered browser actions and assertions to run in one browser context.")
+    @Schema(title = "Actions", description = "Ordered browser actions and assertions to run in one browser context. The list and its fields are rendered and validated before opening a browser session.")
     @NotNull
     @PluginProperty(group = "main")
     @ToString.Exclude
@@ -171,7 +173,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     @Schema(
         title = "Action timeout",
-        description = "Maximum time for each action and assertion. Defaults to `PT30S`; allowed range is `PT0.001S` to `PT10M`."
+        description = """
+            Maximum time for each action and assertion. Defaults to `PT30S`; allowed range is
+            `PT0.001S` to `PT10M`. The range is checked at runtime after rendering, before
+            connecting to the browser.
+            """
     )
     @NotNull
     @Builder.Default
@@ -235,7 +241,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         if (rActions.isEmpty()) {
             throw new IllegalArgumentException("actions must contain at least one browser action");
         }
-        if (rTimeout.isZero() || rTimeout.isNegative() || rTimeout.compareTo(MAX_ACTION_TIMEOUT) > 0) {
+        if (rTimeout.compareTo(Duration.ofMillis(1)) < 0 || rTimeout.compareTo(MAX_ACTION_TIMEOUT) > 0) {
             throw new IllegalArgumentException("actionTimeout must be between PT0.001S and PT10M");
         }
         checkKilled();
@@ -545,16 +551,17 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             return switch (action.action) {
                 case ASSERT_VISIBLE -> page.locator(action.selector).isVisible() ? "element is visible" : "element is not visible";
                 case ASSERT_TEXT -> {
-                    var locator = page.locator(action.selector);
-                    yield locator.count() == 0
-                        ? "no element matched the selector"
-                        : "text '" + truncate(locator.first().textContent(new Locator.TextContentOptions().setTimeout(1_000))) + "'";
+                    var text = page.locator(action.selector).first()
+                        .textContent(new Locator.TextContentOptions().setTimeout(1_000));
+                    yield "text '" + truncate(text) + "'";
                 }
                 case ASSERT_URL -> "URL '" + safeUrl(page.url()) + "'";
                 case ASSERT_TITLE -> "title '" + page.title() + "'";
                 case FILL -> "the input could not be filled";
                 case PRESS -> "the key could not be pressed";
                 case NAVIGATE -> "navigation failed";
+                case CLICK, WAIT_FOR -> cause.getClass().getSimpleName() + "; check the selector or increase actionTimeout";
+                case SCREENSHOT -> cause.getClass().getSimpleName() + "; check page availability and storage access";
                 default -> cause.getClass().getSimpleName();
             };
         } catch (Exception e) {
@@ -563,34 +570,51 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     }
 
     static String resolveUrl(String url, String rBaseUrl) {
-        final URI target;
-        try {
-            target = URI.create(url);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("url for NAVIGATE is invalid: " + safeUrl(url));
+        var target = url.strip();
+        if (target.isEmpty() || target.chars().anyMatch(c -> c < 0x20 || c == 0x7f)) {
+            throw new IllegalArgumentException("url for NAVIGATE is invalid");
         }
 
-        URI resolved = target;
-        if (!target.isAbsolute()) {
-            if (rBaseUrl == null || rBaseUrl.isBlank()) {
-                throw new IllegalArgumentException("baseUrl is required when NAVIGATE uses a relative url");
+        var schemeMatcher = URL_SCHEME.matcher(target);
+        if (schemeMatcher.find()) {
+            var scheme = schemeMatcher.group(1);
+            if ("data".equalsIgnoreCase(scheme)) {
+                return target;
             }
-            final URI base;
-            try {
-                base = URI.create(rBaseUrl);
-            } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("baseUrl must be a valid HTTP or HTTPS URL");
+            if (isHttpScheme(scheme)) {
+                return httpUrl(target, "url for NAVIGATE").toExternalForm();
             }
-            if (!base.isAbsolute() || !isHttpScheme(base.getScheme())) {
-                throw new IllegalArgumentException("baseUrl must be an absolute HTTP or HTTPS URL");
-            }
-            resolved = base.resolve(target);
-        }
-        var scheme = resolved.getScheme();
-        if (!isHttpScheme(scheme) && !"data".equalsIgnoreCase(scheme)) {
             throw new IllegalArgumentException("url for NAVIGATE must use http, https, or data");
         }
-        return resolved.toString();
+
+        if (rBaseUrl == null || rBaseUrl.isBlank()) {
+            throw new IllegalArgumentException("baseUrl is required when NAVIGATE uses a relative url");
+        }
+        var base = httpUrl(rBaseUrl, "baseUrl");
+        try {
+            // URL's legacy query-only resolution drops the last path segment; browsers preserve it.
+            var relative = target.startsWith("?")
+                ? (base.getPath().isEmpty() ? "/" : base.getPath()) + target
+                : target;
+            return new URL(base, relative).toExternalForm();
+        } catch (MalformedURLException e) {
+            throw new IllegalArgumentException("url for NAVIGATE is invalid");
+        }
+    }
+
+    private static URL httpUrl(String value, String field) {
+        try {
+            if (value.chars().anyMatch(c -> c < 0x20 || c == 0x7f)) {
+                throw new MalformedURLException();
+            }
+            var parsed = new URL(value.strip());
+            if (isHttpScheme(parsed.getProtocol()) && parsed.getHost() != null && !parsed.getHost().isBlank()) {
+                return parsed;
+            }
+        } catch (MalformedURLException ignored) {
+            // Keep potentially sensitive URL text out of validation errors.
+        }
+        throw new IllegalArgumentException(field + " must be a valid HTTP or HTTPS URL");
     }
 
     static String validateServerUrl(String serverUrl) {
@@ -664,8 +688,8 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     }
 
     static String screenshotName(String name) {
-        if (name.contains("/") || name.contains("\\") || name.contains("..")) {
-            throw new IllegalArgumentException("screenshot name must not contain '/', '\\', or '..'");
+        if (name.contains("/") || name.contains("\\") || name.equals(".") || name.equals("..")) {
+            throw new IllegalArgumentException("screenshot name must be a filename without path segments");
         }
         return name;
     }
@@ -708,6 +732,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         if (resources != null) {
             Thread.startVirtualThread(() -> closeSession(resources));
         }
+    }
+
+    boolean isBrowserConnected() {
+        var resources = activeSession.get();
+        return resources != null && resources.browser != null;
     }
 
     private void closeActiveSession() {
@@ -800,7 +829,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @ToString.Exclude
         private String key;
 
-        @Schema(title = "Screenshot name", description = "Internal storage filename used by `SCREENSHOT`; cannot contain `/`, `\\`, or `..`.")
+        @Schema(title = "Screenshot name", description = "Internal storage filename used by `SCREENSHOT`; cannot contain path separators or be `.` or `..`.")
         @PluginProperty(group = "destination")
         private String name;
 

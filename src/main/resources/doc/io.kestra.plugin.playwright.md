@@ -15,6 +15,8 @@ docker run --rm -p 3000:3000 mcr.microsoft.com/playwright:v1.63.0-noble \
 
 Set `serverUrl` to the resulting endpoint, such as `ws://playwright:3000/`, or use `wss://` when the server is behind TLS. Store the endpoint in a Kestra secret if it contains credentials or other sensitive connection data.
 
+Use the worker's network egress policy to allow only trusted Playwright endpoints. Scheme validation does not restrict the destination host. Starting a local Node driver for every task run adds startup time.
+
 When upgrading Playwright, update the Java dependency, Docker image tag, `npx` package version, examples, and documentation together.
 
 ## Tasks
@@ -28,13 +30,17 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 | `FILL` | `selector`, `value` | Replaces an input value. The rendered value is never logged. |
 | `PRESS` | `selector`, `key` | Sends a key or shortcut such as `Enter` or `Control+A`. |
 | `WAIT_FOR` | `selector` | Waits until the matching element is visible. |
-| `SCREENSHOT` | `name`, optional `fullPage` | Stores a PNG in Kestra internal storage. `name` cannot contain `/`, `\`, or `..`. |
+| `SCREENSHOT` | `name`, optional `fullPage` | Stores a PNG in Kestra internal storage. `name` cannot contain path separators or be `.` or `..`. |
 | `ASSERT_VISIBLE` | `selector` | Waits for the matching element to be visible. |
 | `ASSERT_TEXT` | `selector`, `text`, optional `regex` | Waits for the element text to equal a string or match a Java regular expression. |
 | `ASSERT_URL` | `url`, optional `regex` | Waits for the page URL to equal a string or match a Java regular expression. |
 | `ASSERT_TITLE` | `title` | Waits for the page title to equal a string. |
 
 Every action can have an `id`. When an action fails, the task message includes its zero-based index and ID, the selector when present, expected and actual values, and artifact URIs.
+
+All action fields support Pebble expressions through the `actions` property. The task renders and validates every action before the browser starts, so a bad template or missing field fails before earlier actions can change a page.
+
+Assertion failure messages may include the page title or up to 200 characters of element text. Restrict access to execution logs and consider this content when forwarding errors to another service.
 
 `actionTimeout` applies to each action and assertion. It defaults to `PT30S` and accepts values up to `PT10M`. Kestra's standard `timeout` property limits the whole task run independently.
 
@@ -51,6 +57,8 @@ Tracing supports three modes:
 Quote `"OFF"` in YAML; otherwise the YAML parser may read it as a boolean.
 
 Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. The task logs a warning when it suppresses a requested trace. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace.
+
+`NAVIGATE` URLs with credentials or query tokens are not detected as sensitive input. Those URLs may still appear in traces and screenshots even though failure messages redact their sensitive parts. For those flows, set `trace: "OFF"` and `failureScreenshot: false` and avoid named screenshots of sensitive pages.
 
 `failureScreenshot` controls the automatic full-page screenshot after a failed action. By default it is enabled for runs without `FILL` or `PRESS` and disabled for runs containing either action. Set it to `true` to opt in for a sensitive run, or `false` to disable it. Named `SCREENSHOT` actions always capture the page when reached. Screenshots may show entered non-password values; limit access to stored artifacts.
 
@@ -117,7 +125,6 @@ tasks:
     type: io.kestra.plugin.playwright.Check
     serverUrl: "{{ secret('PLAYWRIGHT_SERVER_URL') }}"
     baseUrl: https://shop.example.com
-    trace: ALWAYS
     actions:
       - action: NAVIGATE
         url: /products/demo-item

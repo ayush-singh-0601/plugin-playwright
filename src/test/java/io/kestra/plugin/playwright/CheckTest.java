@@ -12,11 +12,9 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
-
-import java.lang.reflect.Field;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -47,7 +45,14 @@ class CheckTest {
     private static final String IMAGE = "mcr.microsoft.com/playwright:v1.63.0-noble";
 
     @Container
-    static final GenericContainer<?> PLAYWRIGHT = new GenericContainer<>(DockerImageName.parse(IMAGE))
+    static final GenericContainer<?> PLAYWRIGHT = new GenericContainer<>(
+        new ImageFromDockerfile("kestra-playwright-test:" + Check.PLAYWRIGHT_VERSION, false)
+            .withDockerfileFromBuilder(builder -> builder
+                .from(IMAGE)
+                .run("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --prefix /opt/playwright-server " +
+                    "--no-audit --no-fund playwright@" + Check.PLAYWRIGHT_VERSION)
+                .build())
+    )
         .withExposedPorts(3000, 3001)
         .withCommand(
             "sh", "-c",
@@ -55,7 +60,7 @@ class CheckTest {
                 "response.writeHead(200, {'Content-Type': 'text/html'});" +
                 "response.end('<title>Relative page</title><h1>Loaded</h1>');" +
                 "}).listen(3001, '0.0.0.0')\" & " +
-                "exec npx -y playwright@1.63.0 run-server --port 3000 --host 0.0.0.0"
+                "exec node /opt/playwright-server/node_modules/playwright/cli.js run-server --port 3000 --host 0.0.0.0"
         )
         .waitingFor(Wait.forLogMessage(".*Listening on ws://.*\\n", 1))
         .withStartupTimeout(Duration.ofMinutes(5));
@@ -144,6 +149,7 @@ class CheckTest {
             .actions(Property.ofValue(List.of(
                 action(Check.ActionType.NAVIGATE).url("/check").build(),
                 action(Check.ActionType.ASSERT_URL).url("http://localhost:3001/check").build(),
+                action(Check.ActionType.NAVIGATE).url("/search?filter[status]=open&q=a b").build(),
                 action(Check.ActionType.ASSERT_TITLE).title("Relative page").build(),
                 action(Check.ActionType.ASSERT_TEXT).selector("h1").text("Loaded").build()
             )))
@@ -384,19 +390,11 @@ class CheckTest {
     }
 
     private void awaitBrowserConnection(Check task, Thread thread) throws Exception {
-        Field sessionField = Check.class.getDeclaredField("activeSession");
-        sessionField.setAccessible(true);
-        var activeSession = (AtomicReference<?>) sessionField.get(task);
         var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
 
         while (thread.isAlive() && System.nanoTime() < deadline) {
-            var session = activeSession.get();
-            if (session != null) {
-                Field browserField = session.getClass().getDeclaredField("browser");
-                browserField.setAccessible(true);
-                if (browserField.get(session) != null) {
-                    return;
-                }
+            if (task.isBrowserConnected()) {
+                return;
             }
             Thread.sleep(10);
         }

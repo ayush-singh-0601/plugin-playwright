@@ -14,7 +14,7 @@ The task supports Chromium, Firefox, and WebKit with these actions:
 - `ASSERT_VISIBLE`, `ASSERT_TEXT`, `ASSERT_URL`, and `ASSERT_TITLE`
 - `SCREENSHOT`
 
-Named screenshots are stored in Kestra internal storage. Failed actions produce a full-page screenshot and, when requested, a Playwright trace for runs without `FILL` or `PRESS`. Automatic failure screenshots and traces are suppressed for runs with either action; `failureScreenshot: true` explicitly enables failure screenshots for those runs. Screenshots may show entered values, so limit access to stored artifacts. Failure messages identify the action and artifact locations while omitting sensitive parts of URLs.
+Named screenshots are stored in Kestra internal storage. By default a failed action stores a full-page screenshot and a trace, unless the run contains `FILL` or `PRESS`. Automatic failure screenshots and traces are suppressed for runs with either action; `failureScreenshot: true` explicitly enables failure screenshots for those runs. Screenshots may show entered values, so limit access to stored artifacts. Failure messages identify the action and artifact locations while omitting sensitive parts of URLs.
 
 Use `actionTimeout` to limit each browser action (default `PT30S`); Kestra's standard `timeout` limits the whole task.
 
@@ -29,7 +29,9 @@ docker run --rm -p 3000:3000 mcr.microsoft.com/playwright:v1.63.0-noble \
 
 The WebSocket endpoint is `ws://localhost:3000/`; use `wss://` when the server is behind TLS. Store it as a Kestra secret for shared environments.
 
-The worker starts a local Playwright Node driver for each run, but browsers run on the remote server. The shaded JAR includes Linux x64 and ARM64 drivers only, so this build requires a Linux worker. Browser downloads are disabled on the worker.
+Allow only trusted Playwright endpoints through the worker's network egress policy. The plugin validates the WebSocket scheme and does not restrict the destination host.
+
+The worker starts a local Playwright Node driver for each run, which adds startup time; browsers run on the remote server. The shaded JAR includes Linux x64 and ARM64 drivers only, so this build requires a Linux worker. Browser downloads are disabled on the worker.
 
 ## Example
 
@@ -55,7 +57,7 @@ tasks:
 
 ## Build and test
 
-The integration tests start the matching Playwright server with Testcontainers, so Docker must be available.
+The integration tests build a pinned Playwright server image with Testcontainers, so Docker and npm registry access are needed for the initial image build. The server uses the installed package at container startup without downloading it again.
 
 ```bash
 ./gradlew test

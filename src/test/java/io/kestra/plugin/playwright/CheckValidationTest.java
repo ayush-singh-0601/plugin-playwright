@@ -108,18 +108,25 @@ class CheckValidationTest {
 
     @Test
     void shouldRejectOutOfRangeActionTimeoutBeforeOpeningDriver() {
-        var task = Check.builder()
-            .id("invalid-timeout-" + UUID.randomUUID())
-            .type(Check.class.getName())
-            .serverUrl(Property.ofValue("ws://127.0.0.1:1/"))
-            .actions(Property.ofValue(List.of(Check.Action.builder()
-                .action(Check.ActionType.NAVIGATE).url("data:text/html,hello").build())))
-            .actionTimeout(Property.ofValue(Duration.ofMinutes(11)))
-            .build();
+        for (var timeout : List.of(
+            Duration.ZERO,
+            Duration.ofNanos(-1),
+            Duration.ofNanos(999_999),
+            Check.MAX_ACTION_TIMEOUT.plusNanos(1)
+        )) {
+            var task = Check.builder()
+                .id("invalid-timeout-" + UUID.randomUUID())
+                .type(Check.class.getName())
+                .serverUrl(Property.ofValue("ws://127.0.0.1:1/"))
+                .actions(Property.ofValue(List.of(Check.Action.builder()
+                    .action(Check.ActionType.NAVIGATE).url("data:text/html,hello").build())))
+                .actionTimeout(Property.ofValue(timeout))
+                .build();
 
-        var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContextFactory.of()));
+            var exception = assertThrows(IllegalArgumentException.class, () -> task.run(runContextFactory.of()));
 
-        assertThat(exception.getMessage(), containsString("actionTimeout must be between"));
+            assertThat(exception.getMessage(), containsString("actionTimeout must be between"));
+        }
     }
 
     private Check task(List<Check.Action> actions) {

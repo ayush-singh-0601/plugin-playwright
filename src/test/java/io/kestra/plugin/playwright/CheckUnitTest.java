@@ -33,7 +33,21 @@ class CheckUnitTest {
         assertThat(assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("file:///etc/passwd", null)).getMessage(),
             containsString("http, https, or data"));
         assertThat(assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("http://bad host", null)).getMessage(),
-            containsString("url for NAVIGATE is invalid"));
+            containsString("url for NAVIGATE must be a valid HTTP or HTTPS URL"));
+        assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("ja\nvascript:alert(1)", "https://example.com/"));
+        assertThrows(IllegalArgumentException.class, () -> Check.resolveUrl("  javascript:alert(1)", "https://example.com/"));
+    }
+
+    @Test
+    void shouldAcceptBrowserUrlsWithBracketsSpacesAndUnicode() {
+        assertThat(Check.resolveUrl("https://example.com/?filter[status]=open", null),
+            is("https://example.com/?filter[status]=open"));
+        assertThat(Check.resolveUrl("/search?q=a b", "https://example.com/app/"),
+            is("https://example.com/search?q=a b"));
+        assertThat(Check.resolveUrl("https://example.com/café?value={a|b}", null),
+            is("https://example.com/café?value={a|b}"));
+        assertThat(Check.resolveUrl("?q=a b", "https://example.com/app/page?old=1#old"),
+            is("https://example.com/app/page?q=a b"));
     }
 
     @Test
@@ -62,10 +76,11 @@ class CheckUnitTest {
 
     @Test
     void shouldRejectUnsafeScreenshotNames() {
-        for (var name : List.of("../capture.png", "folder/capture.png", "folder\\capture.png")) {
+        for (var name : List.of(".", "..", "../capture.png", "folder/capture.png", "folder\\capture.png")) {
             assertThrows(IllegalArgumentException.class, () -> Check.screenshotName(name));
         }
         assertThat(Check.screenshotName("capture.png"), is("capture.png"));
+        assertThat(Check.screenshotName("a..png"), is("a..png"));
     }
 
     @Test
