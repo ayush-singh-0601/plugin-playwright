@@ -1,19 +1,79 @@
 package io.kestra.plugin.playwright;
 
+import com.microsoft.playwright.TimeoutError;
 import io.kestra.core.models.property.Property;
 import org.junit.jupiter.api.Test;
 
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CheckUnitTest {
+    @Test
+    void shouldAllowEmptyAndWhitespaceActionContent() {
+        for (var content : List.of("", "   ")) {
+            var actions = List.of(
+                Check.Action.builder().action(Check.ActionType.FILL).selector("#input").value(content).build(),
+                Check.Action.builder().action(Check.ActionType.ASSERT_TEXT).selector("#result").text(content).build(),
+                Check.Action.builder().action(Check.ActionType.ASSERT_TITLE).title(content).build()
+            );
+
+            assertDoesNotThrow(() -> Check.validateActions(actions, null));
+        }
+    }
+
+    @Test
+    void shouldRejectMissingContentAndBlankActionTargets() {
+        var invalidActions = List.of(
+            Check.Action.builder().action(Check.ActionType.FILL).selector("#input").build(),
+            Check.Action.builder().action(Check.ActionType.ASSERT_TEXT).selector("#result").build(),
+            Check.Action.builder().action(Check.ActionType.ASSERT_TITLE).build(),
+            Check.Action.builder().action(Check.ActionType.CLICK).selector(" ").build(),
+            Check.Action.builder().action(Check.ActionType.NAVIGATE).url("").build(),
+            Check.Action.builder().action(Check.ActionType.ASSERT_URL).url("").build(),
+            Check.Action.builder().action(Check.ActionType.SCREENSHOT).name("").build(),
+            Check.Action.builder().action(Check.ActionType.PRESS).selector("#input").key("").build()
+        );
+
+        for (var action : invalidActions) {
+            var exception = assertThrows(IllegalArgumentException.class,
+                () -> Check.validateActions(List.of(action), null));
+            assertThat(exception.getMessage(), containsString("is required"));
+        }
+    }
+
+    @Test
+    void shouldSummarizeFailuresWithoutExposingSdkMessages() {
+        var secretUrl = "ws://user:private-password@example.com/?token=private-token";
+        var reasons = Map.of(
+            "getaddrinfo ENOTFOUND " + secretUrl, "DNS resolution failed",
+            "getaddrinfo EAI_AGAIN " + secretUrl, "DNS resolution failed",
+            "connect ECONNREFUSED " + secretUrl, "connection refused",
+            "connect ETIMEDOUT " + secretUrl, "operation timed out",
+            "Playwright version mismatch at " + secretUrl, "Playwright client/server version mismatch"
+        );
+        for (var entry : reasons.entrySet()) {
+            var summary = Check.shortMessage(new RuntimeException(entry.getKey()));
+
+            assertThat(summary, is("RuntimeException: " + entry.getValue()));
+        }
+        assertThat(Check.shortMessage(new RuntimeException("Filled value 'private-value'")), is("RuntimeException"));
+        assertThat(Check.shortMessage(new RuntimeException()), is("RuntimeException"));
+        assertThat(Check.shortMessage(new RuntimeException("Private endpoint", new UnknownHostException(secretUrl))),
+            is("UnknownHostException: DNS resolution failed"));
+        assertThat(Check.shortMessage(new TimeoutError("Private filled value")),
+            is("TimeoutError: operation timed out"));
+    }
+
     @Test
     void shouldResolveRelativeNavigationUrls() {
         assertThat(Check.resolveUrl("/login", "https://example.com/app/"), is("https://example.com/login"));

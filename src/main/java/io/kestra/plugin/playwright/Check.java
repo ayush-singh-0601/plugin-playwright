@@ -6,6 +6,7 @@ import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Locator;
 import com.microsoft.playwright.Page;
 import com.microsoft.playwright.Playwright;
+import com.microsoft.playwright.TimeoutError;
 import com.microsoft.playwright.Tracing;
 import com.microsoft.playwright.assertions.LocatorAssertions;
 import com.microsoft.playwright.assertions.PageAssertions;
@@ -34,9 +35,11 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -157,11 +160,16 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @PluginProperty(group = "connection")
     private Property<Browser> browser = Property.ofValue(Browser.CHROMIUM);
 
-    @Schema(title = "Actions", description = "Ordered browser actions and assertions to run in one browser context. The list and its fields are rendered and validated before opening a browser session.")
+    @Schema(
+        title = "Actions",
+        description = """
+            Ordered browser actions and assertions to run in one browser context. The list and
+            its fields are rendered and validated before opening a browser session.
+            """
+    )
     @NotNull
     @PluginProperty(group = "main")
     @ToString.Exclude
-    // Check the rendered list in run(); @NotEmpty rejects populated Property lists during flow validation.
     private Property<List<@Valid Action>> actions;
 
     @Schema(
@@ -262,7 +270,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         TraceRecorder traceRecorder = null;
 
         try {
-            var resources = new SessionResources(createPlaywright(), runContext.logger());
+            var resources = new SessionResources(createPlaywright(runContext.logger()), runContext.logger());
             activeSession.set(resources);
             checkKilled();
             checkStopped();
@@ -275,9 +283,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             } catch (RuntimeException e) {
                 checkKilled();
                 checkStopped();
+                var detail = shortMessage(e);
+                runContext.logger().debug("Playwright connection failed: {}", detail);
                 throw new IllegalStateException(
-                    "Could not connect to the Playwright " + rBrowser + " server. Confirm it is reachable and runs Playwright "
-                        + PLAYWRIGHT_VERSION + "."
+                    "Could not connect to the Playwright " + rBrowser + " server: " + detail
+                        + ". Confirm it is reachable and runs Playwright " + PLAYWRIGHT_VERSION
+                        + "; a client/server version mismatch prevents connection."
                 );
             }
             checkKilled();
@@ -304,6 +315,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 } catch (Exception | AssertionError e) {
                     checkKilled();
                     checkStopped();
+                    runContext.logger().debug("Playwright action [{}] failed: {}", index, shortMessage(e));
                     var artifacts = captureFailureArtifacts(page, traceRecorder, runContext, index, rFailureScreenshot);
                     checkKilled();
                     checkStopped();
@@ -350,7 +362,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             case NAVIGATE -> page.navigate(resolveUrl(required(action.url, "url for NAVIGATE"), rBaseUrl));
             case CLICK -> page.locator(required(action.selector, "selector for CLICK")).click();
             case FILL -> page.locator(required(action.selector, "selector for FILL"))
-                .fill(required(action.value, "value for FILL"));
+                .fill(nonNull(action.value, "value for FILL"));
             case PRESS -> page.locator(required(action.selector, "selector for PRESS"))
                 .press(required(action.key, "key for PRESS"));
             case WAIT_FOR -> page.locator(required(action.selector, "selector for WAIT_FOR"))
@@ -367,17 +379,19 @@ public class Check extends Task implements RunnableTask<Check.Output> {
             case ASSERT_TEXT -> assertText(action, page, timeoutMillis);
             case ASSERT_URL -> assertUrl(action, page, timeoutMillis);
             case ASSERT_TITLE -> assertThat(page).hasTitle(
-                required(action.title, "title for ASSERT_TITLE"),
+                nonNull(action.title, "title for ASSERT_TITLE"),
                 new PageAssertions.HasTitleOptions().setTimeout(timeoutMillis)
             );
         }
     }
 
-    private Playwright createPlaywright() {
+    private Playwright createPlaywright(Logger logger) {
         try {
             return Playwright.create(new Playwright.CreateOptions().setEnv(Map.of("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1")));
         } catch (RuntimeException e) {
             checkKilled();
+            checkStopped();
+            logger.debug("Playwright driver startup failed: {}", shortMessage(e));
             throw new IllegalStateException(
                 "Could not start the Playwright driver. This plugin requires a Linux x64 or ARM64 worker."
             );
@@ -394,7 +408,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 case CLICK, WAIT_FOR, ASSERT_VISIBLE -> required(action.selector, prefix + "selector for " + type);
                 case FILL -> {
                     required(action.selector, prefix + "selector for FILL");
-                    required(action.value, prefix + "value for FILL");
+                    nonNull(action.value, prefix + "value for FILL");
                 }
                 case PRESS -> {
                     required(action.selector, prefix + "selector for PRESS");
@@ -403,7 +417,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 case SCREENSHOT -> screenshotName(required(action.name, prefix + "name for SCREENSHOT"));
                 case ASSERT_TEXT -> {
                     required(action.selector, prefix + "selector for ASSERT_TEXT");
-                    required(action.text, prefix + "text for ASSERT_TEXT");
+                    nonNull(action.text, prefix + "text for ASSERT_TEXT");
                     if (Boolean.TRUE.equals(action.regex)) {
                         validatePattern(action.text, prefix + "text");
                     }
@@ -414,7 +428,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                         validatePattern(action.url, prefix + "url");
                     }
                 }
-                case ASSERT_TITLE -> required(action.title, prefix + "title for ASSERT_TITLE");
+                case ASSERT_TITLE -> nonNull(action.title, prefix + "title for ASSERT_TITLE");
             }
         }
     }
@@ -429,7 +443,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
 
     private void assertText(Action action, Page page, double timeoutMillis) {
         var selector = required(action.selector, "selector for ASSERT_TEXT");
-        var text = required(action.text, "text for ASSERT_TEXT");
+        var text = nonNull(action.text, "text for ASSERT_TEXT");
         var options = new LocatorAssertions.HasTextOptions().setTimeout(timeoutMillis);
         var locator = page.locator(selector);
 
@@ -530,12 +544,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         return switch (action.action) {
             case ASSERT_VISIBLE -> "element to be visible";
             case ASSERT_TEXT -> Boolean.TRUE.equals(action.regex)
-                ? "text matching /" + action.text + "/"
-                : "text '" + action.text + "'";
+                ? "text matching /" + truncate(action.text) + "/"
+                : "text '" + truncate(action.text) + "'";
             case ASSERT_URL -> Boolean.TRUE.equals(action.regex)
                 ? "URL matching /" + safeUrl(action.url) + "/"
                 : "URL '" + safeUrl(action.url) + "'";
-            case ASSERT_TITLE -> "title '" + action.title + "'";
+            case ASSERT_TITLE -> "title '" + truncate(action.title) + "'";
             case NAVIGATE -> "navigation to '" + safeUrl(action.url) + "' to succeed";
             case SCREENSHOT -> "screenshot '" + action.name + "' to be stored";
             default -> "action to complete successfully";
@@ -556,7 +570,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                     yield "text '" + truncate(text) + "'";
                 }
                 case ASSERT_URL -> "URL '" + safeUrl(page.url()) + "'";
-                case ASSERT_TITLE -> "title '" + page.title() + "'";
+                case ASSERT_TITLE -> "title '" + truncate(page.title()) + "'";
                 case FILL -> "the input could not be filled";
                 case PRESS -> "the key could not be pressed";
                 case NAVIGATE -> "navigation failed";
@@ -592,7 +606,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         }
         var base = httpUrl(rBaseUrl, "baseUrl");
         try {
-            // URL's legacy query-only resolution drops the last path segment; browsers preserve it.
+            // Preserve the base path for query-only references.
             var relative = target.startsWith("?")
                 ? (base.getPath().isEmpty() ? "/" : base.getPath()) + target
                 : target;
@@ -673,18 +687,42 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     }
 
     private static <T> T required(T value, String field) {
-        if (value == null || value instanceof String string && string.isBlank()) {
+        nonNull(value, field);
+        if (value instanceof String string && string.isBlank()) {
             throw new IllegalArgumentException(field + " is required");
         }
         return value;
     }
 
-    private static String shortMessage(Throwable throwable) {
-        var message = throwable.getMessage();
-        if (message == null || message.isBlank()) {
-            return throwable.getClass().getSimpleName();
+    private static <T> T nonNull(T value, String field) {
+        if (value == null) {
+            throw new IllegalArgumentException(field + " is required");
         }
-        return message.lines().findFirst().orElse(message).strip();
+        return value;
+    }
+
+    static String shortMessage(Throwable throwable) {
+        // SDK messages can contain credentials or entered values.
+        var current = throwable;
+        for (var depth = 0; current != null && depth < 8; depth++, current = current.getCause()) {
+            var message = current.getMessage() == null ? "" : current.getMessage().toLowerCase(Locale.ROOT);
+            String detail = null;
+            if (message.contains("version mismatch")) {
+                detail = "Playwright client/server version mismatch";
+            } else if (message.contains("enotfound") || message.contains("eai_again")
+                || current instanceof UnknownHostException) {
+                detail = "DNS resolution failed";
+            } else if (message.contains("econnrefused") || message.contains("connection refused")) {
+                detail = "connection refused";
+            } else if (message.contains("etimedout") || message.contains("timed out")
+                || current instanceof TimeoutError) {
+                detail = "operation timed out";
+            }
+            if (detail != null) {
+                return current.getClass().getSimpleName() + ": " + detail;
+            }
+        }
+        return throwable.getClass().getSimpleName();
     }
 
     static String screenshotName(String name) {
@@ -811,7 +849,12 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @PluginProperty(group = "main")
         private String id;
 
-        @Schema(title = "URL", description = "HTTP, HTTPS, or data target for `NAVIGATE`, or expected URL for `ASSERT_URL`.")
+        @Schema(
+            title = "URL",
+            description = """
+                HTTP, HTTPS, or data target for `NAVIGATE`, or expected URL for `ASSERT_URL`.
+                """
+        )
         @PluginProperty(group = "main")
         private String url;
 
@@ -819,17 +862,32 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @PluginProperty(group = "main")
         private String selector;
 
-        @Schema(title = "Value", description = "Text entered by `FILL`. The rendered value is never logged.")
+        @Schema(
+            title = "Value",
+            description = """
+                Text entered by `FILL`. An empty string clears the input. The rendered value is never logged.
+                """
+        )
         @PluginProperty(group = "main", secret = true)
         @ToString.Exclude
         private String value;
 
-        @Schema(title = "Key", description = "Keyboard key or shortcut sent by `PRESS`, such as `Enter` or `Control+A`.")
+        @Schema(
+            title = "Key",
+            description = """
+                Keyboard key or shortcut sent by `PRESS`, such as `Enter` or `Control+A`.
+                """
+        )
         @PluginProperty(group = "main", secret = true)
         @ToString.Exclude
         private String key;
 
-        @Schema(title = "Screenshot name", description = "Internal storage filename used by `SCREENSHOT`; cannot contain path separators or be `.` or `..`.")
+        @Schema(
+            title = "Screenshot name",
+            description = """
+                Internal storage filename used by `SCREENSHOT`; cannot contain path separators or be `.` or `..`.
+                """
+        )
         @PluginProperty(group = "destination")
         private String name;
 
@@ -837,15 +895,22 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @PluginProperty(group = "main")
         private Boolean fullPage;
 
-        @Schema(title = "Expected text", description = "Expected element text used by `ASSERT_TEXT`.")
+        @Schema(title = "Expected text", description = "Expected element text for `ASSERT_TEXT`; may be empty.")
         @PluginProperty(group = "main")
         private String text;
 
-        @Schema(title = "Regular expression", description = "Treat `text` or `url` as a Java regular expression. Defaults to `false`.")
+        @Schema(
+            title = "Regular expression",
+            description = """
+                Treat `text` or `url` as a regular expression. Defaults to `false`. Patterns are
+                validated with Java `Pattern` and evaluated by Playwright as JavaScript regular
+                expressions; use syntax supported by both engines.
+                """
+        )
         @PluginProperty(group = "main")
         private Boolean regex;
 
-        @Schema(title = "Expected title", description = "Expected page title used by `ASSERT_TITLE`.")
+        @Schema(title = "Expected title", description = "Expected page title for `ASSERT_TITLE`; may be empty.")
         @PluginProperty(group = "main")
         private String title;
     }
@@ -859,7 +924,13 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         @Builder.Default
         private Map<String, URI> screenshots = new LinkedHashMap<>();
 
-        @Schema(title = "Trace", description = "Playwright trace URI when `trace` is `ALWAYS` and no `FILL` or `PRESS` action is present. A warning is logged when tracing is suppressed; failure trace URIs are included in error messages.")
+        @Schema(
+            title = "Trace",
+            description = """
+                Playwright trace URI when `trace` is `ALWAYS` and no `FILL` or `PRESS` action is present.
+                A warning is logged when tracing is suppressed; failure trace URIs are included in error messages.
+                """
+        )
         private URI trace;
     }
 

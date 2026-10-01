@@ -27,20 +27,22 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 | --- | --- | --- |
 | `NAVIGATE` | `url` | Opens an HTTP, HTTPS, or data URL, or resolves a relative URL against `baseUrl`. Use a trusted Playwright server for pages with sensitive data. |
 | `CLICK` | `selector` | Clicks the matching element. |
-| `FILL` | `selector`, `value` | Replaces an input value. The rendered value is never logged. |
+| `FILL` | `selector`, `value` | Replaces an input value; an empty string clears the input. The rendered value is never logged. |
 | `PRESS` | `selector`, `key` | Sends a key or shortcut such as `Enter` or `Control+A`. |
 | `WAIT_FOR` | `selector` | Waits until the matching element is visible. |
 | `SCREENSHOT` | `name`, optional `fullPage` | Stores a PNG in Kestra internal storage. `name` cannot contain path separators or be `.` or `..`. |
 | `ASSERT_VISIBLE` | `selector` | Waits for the matching element to be visible. |
-| `ASSERT_TEXT` | `selector`, `text`, optional `regex` | Waits for the element text to equal a string or match a Java regular expression. |
-| `ASSERT_URL` | `url`, optional `regex` | Waits for the page URL to equal a string or match a Java regular expression. |
-| `ASSERT_TITLE` | `title` | Waits for the page title to equal a string. |
+| `ASSERT_TEXT` | `selector`, `text`, optional `regex` | Waits for the element text to equal a string (including empty text) or match a regular expression. |
+| `ASSERT_URL` | `url`, optional `regex` | Waits for the page URL to equal a string or match a regular expression. |
+| `ASSERT_TITLE` | `title` | Waits for the page title to equal a string, including an empty title. |
 
 Every action can have an `id`. When an action fails, the task message includes its zero-based index and ID, the selector when present, expected and actual values, and artifact URIs.
 
 All action fields support Pebble expressions through the `actions` property. The task renders and validates every action before the browser starts, so a bad template or missing field fails before earlier actions can change a page.
 
-Assertion failure messages may include the page title or up to 200 characters of element text. Restrict access to execution logs and consider this content when forwarding errors to another service.
+Expected and actual text and titles in assertion failures are limited to 200 characters, followed by `...` when truncated. Restrict access to execution logs and consider this page content when forwarding errors to another service.
+
+With `regex: true`, patterns are validated with Java `Pattern` and evaluated by Playwright as JavaScript regular expressions. Use syntax supported by both engines.
 
 `actionTimeout` applies to each action and assertion. It defaults to `PT30S` and accepts values up to `PT10M`. Kestra's standard `timeout` property limits the whole task run independently.
 

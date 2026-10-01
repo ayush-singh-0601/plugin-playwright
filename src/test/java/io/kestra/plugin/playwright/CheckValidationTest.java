@@ -85,6 +85,8 @@ class CheckValidationTest {
         var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
 
         assertThat(exception.getMessage(), containsString("Could not connect"));
+        assertThat(exception.getMessage(), containsString("connection refused"));
+        assertThat(exception.getMessage(), containsString("client/server version mismatch"));
         assertThat(exception.getMessage(), not(containsString(secret)));
         assertThat(exception.getMessage(), not(containsString("password")));
         assertNull(exception.getCause());

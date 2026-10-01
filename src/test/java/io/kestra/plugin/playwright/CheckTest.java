@@ -15,6 +15,7 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -67,6 +68,63 @@ class CheckTest {
 
     @Inject
     private RunContextFactory runContextFactory;
+
+    @Test
+    void shouldClearInputAndAssertEmptyTextAndTitleFromYaml() throws Exception {
+        var flow = YamlParser.parse("""
+            id: empty_action_content
+            namespace: company.team
+            tasks:
+              - id: check
+                type: io.kestra.plugin.playwright.Check
+                serverUrl: "%s"
+                trace: "OFF"
+                actions:
+                  - action: NAVIGATE
+                    url: "%s"
+                  - action: ASSERT_TITLE
+                    title: ""
+                  - action: FILL
+                    selector: "#input"
+                    value: ""
+                  - action: ASSERT_TEXT
+                    selector: "#result"
+                    text: ""
+            """.formatted(serverUrl(), page("""
+            <html><head><title></title></head><body>
+              <input id="input" value="initial" oninput="document.querySelector('#result').textContent = this.value" />
+              <div id="result">initial</div>
+            </body></html>
+            """)), Flow.class);
+        var task = (Check) flow.getTasks().getFirst();
+
+        task.run(runContextFactory.of());
+    }
+
+    @Test
+    void shouldBoundExpectedAndActualPageTitles() {
+        var expected = "e".repeat(240) + "expected-tail";
+        var actual = "a".repeat(240) + "actual-tail";
+        var task = Check.builder()
+            .id("long-title-" + UUID.randomUUID())
+            .type(Check.class.getName())
+            .serverUrl(Property.ofValue(serverUrl()))
+            .actions(Property.ofValue(List.of(
+                action(Check.ActionType.NAVIGATE).url(page("<title>" + actual + "</title>")).build(),
+                action(Check.ActionType.ASSERT_TITLE).title(expected).build()
+            )))
+            .trace(Property.ofValue(Check.TraceMode.OFF))
+            .failureScreenshot(Property.ofValue(false))
+            .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
+            .build();
+
+        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
+
+        assertThat(exception.getMessage(), containsString("expected: title '" + "e".repeat(200) + "...'"));
+        assertThat(exception.getMessage(), containsString("actual: title '" + "a".repeat(200) + "...'"));
+        assertThat(exception.getMessage(), not(containsString("expected-tail")));
+        assertThat(exception.getMessage(), not(containsString("actual-tail")));
+    }
 
     @Test
     void shouldRunActionsAndStoreScreenshotWithoutSensitiveTrace() throws Exception {
