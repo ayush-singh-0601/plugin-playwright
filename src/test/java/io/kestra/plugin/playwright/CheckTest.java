@@ -127,7 +127,7 @@ class CheckTest {
     }
 
     @Test
-    void shouldRunActionsAndStoreScreenshotWithoutSensitiveTrace() throws Exception {
+    void shouldRunActionsAndStoreScreenshotAndExplicitTraceForSensitiveRuns() throws Exception {
         var task = task(
             Property.ofValue(List.of(
                 action(Check.ActionType.NAVIGATE).url(page("""
@@ -158,7 +158,8 @@ class CheckTest {
 
         assertThat(output.getScreenshots(), hasEntry(is("smoke.png"), notNullValue()));
         assertStored(runContext, output.getScreenshots().get("smoke.png"));
-        assertThat(output.getTrace(), nullValue());
+        assertThat(output.getTrace(), notNullValue());
+        assertStored(runContext, output.getTrace());
     }
 
     @Test
@@ -333,7 +334,7 @@ class CheckTest {
     }
 
     @Test
-    void shouldKeepFailedFillValueOutOfExceptionChainAndTrace() throws Exception {
+    void shouldKeepFailedFillValueOutOfExceptionChainButKeepArtifacts() throws Exception {
         var secret = "password-never-in-an-error";
         var task = Check.builder()
             .id("secret-failure-" + UUID.randomUUID())
@@ -346,18 +347,21 @@ class CheckTest {
             .trace(Property.ofValue(Check.TraceMode.ALWAYS))
             .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
             .build();
+        var runContext = runContextFactory.of();
 
-        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
+        var exception = assertThrows(IllegalStateException.class, () -> task.run(runContext));
 
-        assertThat(exception.getMessage(), containsString("screenshot: unavailable"));
-        assertThat(exception.getMessage(), containsString("trace: unavailable"));
+        var matcher = Pattern.compile("screenshot: ([^;]+); trace: (\\S+)$").matcher(exception.getMessage());
+        assertThat(matcher.find(), is(true));
+        assertStored(runContext, URI.create(matcher.group(1)));
+        assertStored(runContext, URI.create(matcher.group(2)));
         for (Throwable current = exception; current != null; current = current.getCause()) {
             assertThat(current.toString(), not(containsString(secret)));
         }
     }
 
     @Test
-    void shouldAllowExplicitFailureScreenshotForSensitiveActions() throws Exception {
+    void shouldStoreFailureScreenshotByDefaultForSensitiveActionsAndSkipTrace() throws Exception {
         var task = Check.builder()
             .id("sensitive-screenshot-" + UUID.randomUUID())
             .type(Check.class.getName())
@@ -367,16 +371,40 @@ class CheckTest {
                 action(Check.ActionType.FILL).selector("#message").value("visible value").build(),
                 action(Check.ActionType.ASSERT_TEXT).selector("#message").text("not this").build()
             )))
-            .trace(Property.ofValue(Check.TraceMode.OFF))
-            .failureScreenshot(Property.ofValue(true))
             .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
             .build();
         var runContext = runContextFactory.of();
 
         var exception = assertThrows(IllegalStateException.class, () -> task.run(runContext));
-        var matcher = Pattern.compile("screenshot: ([^;]+); trace: unavailable$").matcher(exception.getMessage());
+        var matcher = Pattern.compile("screenshot: ([^;]+); trace: unavailable \\(skipped for FILL or PRESS runs[^)]*\\)$").matcher(exception.getMessage());
         assertThat(matcher.find(), is(true));
         assertStored(runContext, URI.create(matcher.group(1)));
+        assertThat(exception.getMessage(), containsString("actual: hidden"));
+        assertThat(exception.getMessage(), not(containsString("visible value")));
+    }
+
+    @Test
+    void shouldHideActualTextAndTitleUnlessRequested() throws Exception {
+        var html = "<html><head><title>Private title</title></head><body><div id='status'>Private text</div></body></html>";
+        for (var includeActual : List.of(false, true)) {
+            var task = Check.builder()
+                .id("include-actual-" + UUID.randomUUID())
+                .type(Check.class.getName())
+                .serverUrl(Property.ofValue(serverUrl()))
+                .actions(Property.ofValue(List.of(
+                    action(Check.ActionType.NAVIGATE).url(page(html)).build(),
+                    action(Check.ActionType.ASSERT_TEXT).selector("#status").text("Other").build()
+                )))
+                .trace(Property.ofValue(Check.TraceMode.OFF))
+                .failureScreenshot(Property.ofValue(false))
+                .includeActualValue(Property.ofValue(includeActual))
+                .actionTimeout(Property.ofValue(Duration.ofSeconds(1)))
+                .build();
+
+            var exception = assertThrows(IllegalStateException.class, () -> task.run(runContextFactory.of()));
+
+            assertThat(exception.getMessage().contains("Private text"), is(includeActual));
+        }
     }
 
     @Test

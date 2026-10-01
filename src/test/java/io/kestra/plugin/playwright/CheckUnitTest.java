@@ -1,5 +1,6 @@
 package io.kestra.plugin.playwright;
 
+import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.TimeoutError;
 import io.kestra.core.models.property.Property;
 import org.junit.jupiter.api.Test;
@@ -101,13 +102,15 @@ class CheckUnitTest {
     @Test
     void shouldAcceptBrowserUrlsWithBracketsSpacesAndUnicode() {
         assertThat(Check.resolveUrl("https://example.com/?filter[status]=open", null),
-            is("https://example.com/?filter[status]=open"));
+            is("https://example.com/?filter%5Bstatus%5D=open"));
         assertThat(Check.resolveUrl("/search?q=a b", "https://example.com/app/"),
-            is("https://example.com/search?q=a b"));
+            is("https://example.com/search?q=a%20b"));
         assertThat(Check.resolveUrl("https://example.com/café?value={a|b}", null),
-            is("https://example.com/café?value={a|b}"));
+            is("https://example.com/café?value=%7Ba%7Cb%7D"));
         assertThat(Check.resolveUrl("?q=a b", "https://example.com/app/page?old=1#old"),
-            is("https://example.com/app/page?q=a b"));
+            is("https://example.com/app/page?q=a%20b"));
+        assertThat(Check.resolveUrl("http://[::1]:3000/a?b=1", null), is("http://[::1]:3000/a?b=1"));
+        assertThat(Check.resolveUrl("login", "https://example.com"), is("https://example.com/login"));
     }
 
     @Test
@@ -132,6 +135,11 @@ class CheckUnitTest {
 
         assertThat(action.toString(), not(containsString("highly-sensitive-value")));
         assertThat(task.toString(), not(containsString("highly-sensitive-value")));
+    }
+
+    @Test
+    void shouldMatchPlaywrightClientVersionOnClasspath() {
+        assertThat(Check.PLAYWRIGHT_VERSION, is(Playwright.class.getPackage().getImplementationVersion()));
     }
 
     @Test

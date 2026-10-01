@@ -38,13 +38,13 @@ When upgrading Playwright, update the Java dependency, Docker image tag, `npx` p
 
 Every action can have an `id`. When an action fails, the task message includes its zero-based index and ID, the selector when present, expected and actual values, and artifact URIs.
 
-All action fields support Pebble expressions through the `actions` property. The task renders and validates every action before the browser starts, so a bad template or missing field fails before earlier actions can change a page.
+All action fields support Pebble expressions through the `actions` property. The whole list is rendered once at list level, so action fields are plain values and not individual `Property` objects. The task renders and validates every action before the browser starts, so a bad template or missing field fails before earlier actions can change a page.
 
-Expected and actual text and titles in assertion failures are limited to 200 characters, followed by `...` when truncated. Restrict access to execution logs and consider this page content when forwarding errors to another service.
+Expected and actual text and titles in assertion failures are limited to 200 characters, followed by `...` when truncated. Restrict access to execution logs and consider this page content when forwarding errors to another service. For runs containing `FILL` or `PRESS`, the actual text and title are hidden by default; set `includeActualValue: true` to show them.
 
 With `regex: true`, patterns are validated with Java `Pattern` and evaluated by Playwright as JavaScript regular expressions. Use syntax supported by both engines.
 
-`actionTimeout` applies to each action and assertion. It defaults to `PT30S` and accepts values up to `PT10M`. Kestra's standard `timeout` property limits the whole task run independently.
+`actionTimeout` applies to each action and assertion. It defaults to `PT30S` and accepts values from `PT0.001S` to `PT10M`. Kestra's standard `timeout` property limits the whole task run independently.
 
 ## Screenshots and traces
 
@@ -52,17 +52,19 @@ Named `SCREENSHOT` actions are returned in the `screenshots` output as a map of 
 
 Tracing supports three modes:
 
-- `ON_FAILURE` records a trace and stores it only when an action fails. This is the default.
+- `ON_FAILURE` records a trace and stores it only when an action fails. This is the default. It is skipped for runs containing `FILL` or `PRESS`.
 - `ALWAYS` stores a trace for successful and failed checks. Successful trace URIs are returned in the `trace` output.
 - `OFF` disables traces.
 
 Quote `"OFF"` in YAML; otherwise the YAML parser may read it as a boolean.
 
-Tracing is automatically disabled for a run containing `FILL` or `PRESS`, even with `ON_FAILURE` or `ALWAYS`, because a trace can include the entered value. The task logs a warning when it suppresses a requested trace. Other traces can include page content and URLs. Use `OFF` for pages containing sensitive information that could appear in a trace.
+Traces include network requests and headers (cookies, authorization headers), page snapshots, screenshots, and page content, so they can expose credentials and personal data. Use `OFF` for sensitive pages and limit access to stored traces.
+
+With `ON_FAILURE`, tracing is skipped for a run containing `FILL` or `PRESS` because a trace can include the entered value, and the task logs a warning. Set `trace: ALWAYS` to opt in explicitly for such runs; the trace is then stored on success and on failure.
 
 `NAVIGATE` URLs with credentials or query tokens are not detected as sensitive input. Those URLs may still appear in traces and screenshots even though failure messages redact their sensitive parts. For those flows, set `trace: "OFF"` and `failureScreenshot: false` and avoid named screenshots of sensitive pages.
 
-`failureScreenshot` controls the automatic full-page screenshot after a failed action. By default it is enabled for runs without `FILL` or `PRESS` and disabled for runs containing either action. Set it to `true` to opt in for a sensitive run, or `false` to disable it. Named `SCREENSHOT` actions always capture the page when reached. Screenshots may show entered non-password values; limit access to stored artifacts.
+`failureScreenshot` controls the automatic full-page screenshot after a failed action. It is enabled by default for every run, including those with `FILL` or `PRESS`, so failures stay debuggable. Set it to `false` for sensitive pages. Named `SCREENSHOT` actions always capture the page when reached. Screenshots may show entered non-password values; limit access to stored artifacts.
 
 Open a downloaded trace with the [Playwright Trace Viewer](https://trace.playwright.dev/).
 

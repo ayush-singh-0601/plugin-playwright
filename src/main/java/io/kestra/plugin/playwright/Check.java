@@ -31,10 +31,8 @@ import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 import org.slf4j.Logger;
 
-import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.net.URL;
 import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -57,8 +55,8 @@ import static com.microsoft.playwright.assertions.PlaywrightAssertions.assertTha
     description = """
         Connects to a remote Playwright 1.63.0 server, opens one browser context, and runs an
         ordered list of browser actions and web-first assertions. A failed action stores a
-        full-page screenshot and, when actions contain no `FILL` or `PRESS`, a Playwright trace
-        in Kestra internal storage.
+        full-page screenshot and a Playwright trace in Kestra internal storage. For runs
+        containing `FILL` or `PRESS`, the trace is skipped unless `trace` is `ALWAYS`.
         The server and Java client must use the same Playwright version.
         """
 )
@@ -164,7 +162,9 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         title = "Actions",
         description = """
             Ordered browser actions and assertions to run in one browser context. The list and
-            its fields are rendered and validated before opening a browser session.
+            its fields are rendered and validated before opening a browser session. Rendering
+            happens once at list level: the whole `actions` list is rendered as Pebble, so each
+            action field is a plain value rather than an individual `Property`.
             """
     )
     @NotNull
@@ -182,8 +182,8 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @Schema(
         title = "Action timeout",
         description = """
-            Maximum time for each action and assertion. Defaults to `PT30S`; allowed range is
-            `PT0.001S` to `PT10M`. The range is checked at runtime after rendering, before
+            Maximum time for each action and assertion. Defaults to `PT30S`. Minimum is `PT0.001S`
+            and maximum is `PT10M`. The range is checked at runtime after rendering, before
             connecting to the browser.
             """
     )
@@ -195,20 +195,36 @@ public class Check extends Task implements RunnableTask<Check.Output> {
     @Schema(
         title = "Failure screenshot",
         description = """
-            Captures a full-page screenshot when an action fails. By default this is disabled for
-            runs containing `FILL` or `PRESS`, because entered values may appear in the image.
-            Set to `true` to opt in for those runs, or `false` to disable failure screenshots.
+            Captures a full-page screenshot when an action fails. Enabled by default, including for
+            runs containing `FILL` or `PRESS`, so failures stay debuggable. Entered values may
+            appear in the image and in stored artifacts: limit access to them, or set to `false`
+            for sensitive pages.
             """
     )
     @PluginProperty(group = "reliability")
     private Property<Boolean> failureScreenshot;
 
     @Schema(
+        title = "Include actual value in failures",
+        description = """
+            Adds the actual page text or title to `ASSERT_TEXT` and `ASSERT_TITLE` failure messages.
+            Defaults to `false` for runs containing `FILL` or `PRESS`, and `true` otherwise. The value is
+            page content, so it ends up in execution logs and in the task error.
+            """
+    )
+    @PluginProperty(group = "reliability")
+    private Property<Boolean> includeActualValue;
+
+    @Schema(
         title = "Trace mode",
         description = """
-            Controls trace recording: `OFF`, `ON_FAILURE` (default), or `ALWAYS`. Tracing is
-            disabled with a warning for runs containing `FILL` or `PRESS` actions because traces
-            can expose their values. Other traces may contain page content and URLs; use `OFF` for sensitive pages.
+            Controls trace recording: `OFF`, `ON_FAILURE` (default), or `ALWAYS`. Traces include
+            network requests and headers (such as cookies and authorization headers), page
+            snapshots, screenshots, and page content, so they may expose credentials and personal
+            data. Use `OFF` for sensitive pages and limit access to stored traces.
+            For runs containing `FILL` or `PRESS`, `ON_FAILURE` is skipped with a warning because
+            traces can expose entered values. Set `ALWAYS` to opt in explicitly for those runs; the
+            trace is then stored on success and on failure.
             """
     )
     @NotNull
@@ -245,6 +261,9 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         var rBaseUrl = runContext.render(baseUrl).as(String.class).orElse(null);
         var rTimeout = runContext.render(actionTimeout).as(Duration.class).orElse(DEFAULT_ACTION_TIMEOUT);
         var rTrace = runContext.render(trace).as(TraceMode.class).orElse(TraceMode.ON_FAILURE);
+        var sensitiveInput = rActions.stream().anyMatch(Check::entersSensitiveInput);
+        var rFailureScreenshot = runContext.render(failureScreenshot).as(Boolean.class).orElse(true);
+        var rIncludeActualValue = runContext.render(includeActualValue).as(Boolean.class).orElse(!sensitiveInput);
 
         if (rActions.isEmpty()) {
             throw new IllegalArgumentException("actions must contain at least one browser action");
@@ -255,14 +274,11 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         checkKilled();
         checkStopped();
         validateActions(rActions, rBaseUrl);
-        var sensitiveInput = rActions.stream().anyMatch(Check::entersSensitiveInput);
-        var suppressTrace = rTrace != TraceMode.OFF && sensitiveInput;
-        var rFailureScreenshot = runContext.render(failureScreenshot).as(Boolean.class).orElse(!sensitiveInput);
+        var suppressTrace = rTrace == TraceMode.ON_FAILURE && sensitiveInput;
         if (suppressTrace) {
-            runContext.logger().warn("Playwright tracing is disabled for this run because its actions contain FILL or PRESS; no trace will be stored");
-        }
-        if (sensitiveInput && !rFailureScreenshot) {
-            runContext.logger().warn("Failure screenshots are disabled for this run because its actions contain FILL or PRESS");
+            runContext.logger().warn("Playwright tracing is disabled for this run because its actions contain FILL or PRESS; set trace to ALWAYS to opt in");
+        } else if (rTrace == TraceMode.ALWAYS && sensitiveInput) {
+            runContext.logger().warn("Playwright tracing is enabled with FILL or PRESS actions; the stored trace may expose entered values");
         }
 
         var screenshots = new LinkedHashMap<String, URI>();
@@ -319,7 +335,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                     var artifacts = captureFailureArtifacts(page, traceRecorder, runContext, index, rFailureScreenshot);
                     checkKilled();
                     checkStopped();
-                    throw actionFailure(index, action, page, e, artifacts);
+                    throw actionFailure(index, action, page, e, artifacts, rIncludeActualValue, suppressTrace);
                 }
             }
 
@@ -518,15 +534,19 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         Action action,
         Page page,
         Throwable cause,
-        FailureArtifacts artifacts
+        FailureArtifacts artifacts,
+        boolean includeActual,
+        boolean traceSuppressed
     ) {
         var actionName = action.action == null ? "UNKNOWN" : action.action.name();
         var id = action.id == null || action.id.isBlank() ? "" : " (id '" + action.id + "')";
         var selector = action.selector == null ? "" : "; selector '" + action.selector + "'";
         var expected = expected(action);
-        var actual = actual(action, page, cause);
+        var actual = actual(action, page, cause, includeActual);
         var screenshot = artifacts.screenshot() == null ? "unavailable" : artifacts.screenshot().toString();
-        var failureTrace = artifacts.trace() == null ? "unavailable" : artifacts.trace().toString();
+        var failureTrace = artifacts.trace() != null
+            ? artifacts.trace().toString()
+            : traceSuppressed ? "unavailable (skipped for FILL or PRESS runs; set trace to ALWAYS to opt in)" : "unavailable";
 
         var message = "Action " + index + id + " [" + actionName + "] failed" + selector
                 + "; expected: " + expected
@@ -556,9 +576,13 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         };
     }
 
-    private String actual(Action action, Page page, Throwable cause) {
+    private String actual(Action action, Page page, Throwable cause, boolean includeActual) {
         if (action.action == null) {
             return cause.getClass().getSimpleName();
+        }
+
+        if (!includeActual && (action.action == ActionType.ASSERT_TEXT || action.action == ActionType.ASSERT_TITLE)) {
+            return "hidden (set includeActualValue to true to show it)";
         }
 
         try {
@@ -596,7 +620,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 return target;
             }
             if (isHttpScheme(scheme)) {
-                return httpUrl(target, "url for NAVIGATE").toExternalForm();
+                return httpUri(target, "url for NAVIGATE").toString();
             }
             throw new IllegalArgumentException("url for NAVIGATE must use http, https, or data");
         }
@@ -604,31 +628,56 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         if (rBaseUrl == null || rBaseUrl.isBlank()) {
             throw new IllegalArgumentException("baseUrl is required when NAVIGATE uses a relative url");
         }
-        var base = httpUrl(rBaseUrl, "baseUrl");
+        var base = httpUri(rBaseUrl, "baseUrl");
         try {
-            // Preserve the base path for query-only references.
-            var relative = target.startsWith("?")
-                ? (base.getPath().isEmpty() ? "/" : base.getPath()) + target
-                : target;
-            return new URL(base, relative).toExternalForm();
-        } catch (MalformedURLException e) {
+            // URI.resolve mishandles an empty base path, and query-only references must keep the base path.
+            var basePath = base.getRawPath() == null || base.getRawPath().isEmpty() ? "/" : base.getRawPath();
+            var resolvable = URI.create(base.getScheme() + "://" + base.getRawAuthority() + basePath);
+            var relative = target.startsWith("?") ? basePath + target : target;
+            return resolvable.resolve(parseUri(relative)).toString();
+        } catch (URISyntaxException | IllegalArgumentException e) {
             throw new IllegalArgumentException("url for NAVIGATE is invalid");
         }
     }
 
-    private static URL httpUrl(String value, String field) {
+    private static URI httpUri(String value, String field) {
         try {
-            if (value.chars().anyMatch(c -> c < 0x20 || c == 0x7f)) {
-                throw new MalformedURLException();
-            }
-            var parsed = new URL(value.strip());
-            if (isHttpScheme(parsed.getProtocol()) && parsed.getHost() != null && !parsed.getHost().isBlank()) {
+            var parsed = parseUri(value.strip());
+            if (isHttpScheme(parsed.getScheme()) && parsed.getHost() != null && !parsed.getHost().isBlank()) {
                 return parsed;
             }
-        } catch (MalformedURLException ignored) {
+        } catch (URISyntaxException ignored) {
             // Keep potentially sensitive URL text out of validation errors.
         }
         throw new IllegalArgumentException(field + " must be a valid HTTP or HTTPS URL");
+    }
+
+    // java.net.URI rejects spaces, brackets and braces that browsers accept in paths and queries, so percent-encode them.
+    private static URI parseUri(String value) throws URISyntaxException {
+        var schemeMatcher = URL_SCHEME.matcher(value);
+        var offset = schemeMatcher.find() ? schemeMatcher.end() : 0;
+        var rest = value.substring(offset);
+        var authorityEnd = 0;
+        if (rest.startsWith("//")) {
+            authorityEnd = rest.length();
+            for (var index = 2; index < rest.length(); index++) {
+                if ("/?#".indexOf(rest.charAt(index)) >= 0) {
+                    authorityEnd = index;
+                    break;
+                }
+            }
+        }
+
+        var encoded = new StringBuilder(value.substring(0, offset)).append(rest, 0, authorityEnd);
+        for (var index = authorityEnd; index < rest.length(); index++) {
+            var character = rest.charAt(index);
+            if (" \"<>\\^`{|}[]".indexOf(character) >= 0) {
+                encoded.append('%').append(String.format("%02X", (int) character));
+            } else {
+                encoded.append(character);
+            }
+        }
+        return new URI(encoded.toString());
     }
 
     static String validateServerUrl(String serverUrl) {
@@ -765,6 +814,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
         closeActiveSessionAsync();
     }
 
+    // Playwright's sync API has no cancel call, a blocked action only returns once its connection is closed.
     private void closeActiveSessionAsync() {
         var resources = activeSession.getAndSet(null);
         if (resources != null) {
@@ -878,7 +928,7 @@ public class Check extends Task implements RunnableTask<Check.Output> {
                 Keyboard key or shortcut sent by `PRESS`, such as `Enter` or `Control+A`.
                 """
         )
-        @PluginProperty(group = "main", secret = true)
+        @PluginProperty(group = "main")
         @ToString.Exclude
         private String key;
 
